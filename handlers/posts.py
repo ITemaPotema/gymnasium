@@ -385,6 +385,9 @@ async def get_likers_list(callback: CallbackQuery, token: str):
 
     data = await post_api.get_pupil_liked_post(post_id=post_id)
 
+    if not data:
+        return
+
     buffer = ""
 
     for pupil in data:

@@ -34,9 +34,11 @@ class GymcoinsApi(BaseApi):
         if amount > profit:
             return False
 
-        query_id = BaseApi.generate_signature(str(self.tg_id), self.secret_key) # генерируем сигнатуру используя общий секретный ключ
-        time_stamp = int(time.time()) # временная метка
-        query = f"{query_id}:{time_stamp}"
+        time_stamp = str(int(time.time()))  # временная метка
+        query_generate = time_stamp + str(self.tg_id)  # данные для подписи, обеспечивают уникальность query_id
+        query_id = BaseApi.generate_signature(query_generate, self.secret_key)[:16]  # генерируем сигнатуру используя общий секретный ключ, query_id - первые 16 символов
+
+        query = f"withdraw:{query_id}:{time_stamp}"
 
         async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
             headers = {"Authorization": f"Bearer {self.token}"}

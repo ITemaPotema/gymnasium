@@ -1,0 +1,11 @@
+
+2025-04-04 22:47:06,433 - app - INFO - Start login process by Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.88 Mobile Safari/537.36 Telegram-Android/11.9.0 (Huawei FOA-LX9; Android 12; SDK 31; HIGH)
+2025-04-04 22:48:07,395 - app - INFO - Succesful authorization by Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.88 Mobile Safari/537.36 Telegram-Android/11.9.0 (Huawei FOA-LX9; Android 12; SDK 31; HIGH)
+2025-04-04 22:55:45,667 - app - INFO - User is already authorized
+2025-04-04 23:25:49,144 - app - INFO - Start login process by Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.135 Mobile Safari/537.36 Telegram-Android/11.9.0 (Samsung SM-A546E; Android 13; SDK 33; HIGH)
+2025-04-04 23:28:03,865 - app - INFO - Start login process by Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.135 Mobile Safari/537.36 Telegram-Android/11.9.0 (Samsung SM-A546E; Android 13; SDK 33; HIGH)
+2025-04-04 23:29:38,232 - app - INFO - Succesful authorization by Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.135 Mobile Safari/537.36 Telegram-Android/11.9.0 (Samsung SM-A546E; Android 13; SDK 33; HIGH)
+2025-04-04 23:39:43,267 - app - INFO - Start login process by Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148
+2025-04-04 23:39:51,839 - app - ERROR - Redirect error. User Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1 was redirected on page he shoudn`t during VK authorization
+2025-04-07 21:40:33,753 - app - INFO - Start login process by Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.88 Mobile Safari/537.36 Telegram-Android/11.9.0 (Huawei FOA-LX9; Android 12; SDK 31; HIGH)
+2025-04-07 21:41:09,286 - app - INFO - Start login process by Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.88 Mobile Safari/537.36 Telegram-Android/11.9.0 (Huawei FOA-LX9; Android 12; SDK 31; HIGH)
