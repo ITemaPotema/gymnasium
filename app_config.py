@@ -66,11 +66,14 @@ def get_user_id(init_data: str):
 
 
 # проверка на одноразовость query_id
-def check_query_id_unique(query_id: str, time_stamp: int):
+def check_query_id_unique(query_id: str, time_stamp: int, n: int = None):
     redis = get_redis()
 
+    if n:
+        query_id = query_id[:n] # сокращаем query id, так как он может быть очень длинным(hmac)
+
     time_delta = int(time.time()) - time_stamp
-    if time_delta > 3600 * 2:  # проверка, что запрос не старый (2 часа)
+    if time_delta > 60 * 15:  # проверка, что запрос не старый (15 мин)
         return False
 
     print(f"time_delta: {time_delta}", f"query_id={query_id}")
@@ -78,7 +81,7 @@ def check_query_id_unique(query_id: str, time_stamp: int):
     if redis.get(f"used_query_id:{query_id}"):  # проверка того, что данный query_id не был в недавних запросах
         return False
 
-    redis.setex(f"used_query_id:{query_id}", 3600 * 2, query_id)  # сохраняем query_id на 2 часа
+    redis.setex(f"used_query_id:{query_id}", 60 * 15, query_id)  # сохраняем query_id на 15 мин
 
     return True
 

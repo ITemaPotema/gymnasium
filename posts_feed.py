@@ -107,7 +107,7 @@ def get_my_active_posts(db: Session = Depends(get_db), payload: TokenPayload = D
     return JSONResponse(content={"count": count, "posts": answer})
 
 # лайк или дизлайк посту
-@feed_router.post("/post/{action}/{post_id}", dependencies=[Depends(auth.access_token_required)])
+@feed_router.post("/post/reaction/{action}/{post_id}", dependencies=[Depends(auth.access_token_required)])
 def like_post(action: str, post_id: int, db: Session = Depends(get_db)):
     row_exist = db.query(Posts).filter_by(post_id=post_id).first()
 
@@ -213,7 +213,7 @@ def delete_post(post_id: int, db: Session = Depends(get_db), payload: TokenPaylo
     if not is_admin:
         stmt = delete(Posts).filter_by(post_id=post_id, creator_id=user_id) # важно, чтоб пост, который собирается удалить пользователь принадлежал именно ему
     else:
-        stmt = delete(Posts).filter_by(post_id=post_id) # если пользователь админ, о необязательно, чтоб пост принадлежал именно ему
+        stmt = delete(Posts).filter_by(post_id=post_id) # если пользователь админ, то необязательно, чтоб пост принадлежал именно ему
 
     result = db.execute(stmt)
     db.commit()
