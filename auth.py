@@ -155,6 +155,10 @@ def verify_user_with_vk_id(user_data: UserVkData, db: Session = Depends(get_db))
 
     return JSONResponse({"message": "ok"}, status_code=200)
 
+# эндпоинт получения access токена
+# в качестве авторизационных данных используется подписанное общим
+# секретным ключом id пользователя. Бот автоматически делает запрос
+# на этот эндпоинт,когда токен истекает.
 
 @auth_router.post("/sign_in")
 def get_access_token(request: Request, data: TokenRequest, db: Session = Depends(get_db)):
