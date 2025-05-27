@@ -1,0 +1,72 @@
+Index: handlers/run.py
+===================================================================
+diff --git a/handlers/run.py b/handlers/run.py
+deleted file mode 100644
+--- a/handlers/run.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ /dev/null	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
+@@ -1,64 +0,0 @@
+-import asyncio
+-from handlers.bot_config import bot, dp
+-from handlers.base import base_router
+-from handlers.registration import registration_router
+-from handlers.user_search import search_router
+-from handlers.feeds import feed_router
+-from handlers.gymcoins import gymcoins_router
+-from handlers.subscriptions import options_router
+-from handlers.admin import admin_router
+-from handlers.anonymous_chat import chat_router
+-from redis import asyncio as aioredis
+-from handlers.api.admin_api import AdminApi
+-from handlers.api.auth_api import AuthApi
+-from aiocron import crontab
+-from functools import partial
+-from decouple import config
+-
+-async def schedule_task():
+-    admin_id = int(config("ADMIN_ID"))
+-    auth_api = AuthApi(admin_id)
+-    res = await auth_api.login()
+-    admin_api = AdminApi(admin_id, res.token)
+-
+-    wrapped_func = partial(admin_api.pay_to_win_posts, bot)
+-    crontab("7 19 * * *", func=wrapped_func)
+-
+-    # Бесконечный цикл для поддержания работы планировщика
+-    while True:
+-        await asyncio.sleep(1)
+-
+-async def main():
+-    dp.include_router(base_router)
+-    dp.include_router(registration_router)
+-    dp.include_router(search_router)
+-    dp.include_router(feed_router)
+-    dp.include_router(gymcoins_router)
+-    dp.include_router(options_router)
+-    dp.include_router(admin_router)
+-    dp.include_router(chat_router)
+-
+-    redis_domain = config("REDIS_DOMAIN")
+-    password = config("REDIS_PASSWORD")
+-    admin_id = config("ADMIN_ID")
+-
+-    redis = await aioredis.from_url(f"redis://{redis_domain}:6379/0", password=password, max_connections=10)
+-
+-    # инициализация нужных ключей и привилегий админов
+-    async with redis.pipeline() as pipe:
+-        pipe.multi()
+-        pipe.set("bank:balance", "1000000000") # баланс банка
+-        pipe.set(f"{admin_id}:extra", "10")
+-        pipe.rpush(f"{admin_id}:content_list", "stat")
+-        pipe.set(f"{admin_id}:profit", "1000000")
+-        pipe.set("chat_online", "0")
+-        await pipe.execute()
+-
+-    asyncio.create_task(schedule_task())
+-
+-    await bot.delete_webhook(drop_pending_updates=True)
+-    await dp.start_polling(bot)
+-
+-
+-if __name__ == "__main__":
+-    asyncio.run(main())
+\ No newline at end of file

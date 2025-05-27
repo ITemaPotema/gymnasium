@@ -1,0 +1,11 @@
+fastapi
+python_decouple
+sqlalchemy
+vk-api
+authx
+pydantic
+jinja2
+redis
+aiocron
+uvicorn
+requests

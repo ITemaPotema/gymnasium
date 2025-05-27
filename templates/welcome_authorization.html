@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <div class="container">
+        <h1>Добро пожаловать в Gymnasium 587!</h1>
+        <p>Для того, чтобы получить доступ ко всем функциям платформы, пройди процедуры авторизации, а затем регистрации</p>
+        <a href="#" class="button" onclick="sendData()">Начать</a>
+    </div>
+    <script async src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+        // Получаем данные из Telegram Web App
+        const tg = window.Telegram.WebApp;
+
+        tg.MainButton.show();
+        tg.MainButton.setText("Закрыть");
+        tg.MainButton.onClick(() => tg.close());
+
+
+        function sendData() {
+            window.location.replace("/authorization");
+        }
+    </script>
+{% endblock %}

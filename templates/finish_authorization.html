@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container">
+    <h1>{{ message }}</h1>
+    <p>{{ comment }}</p>
+    <button class="button" onclick="closeWebApp()">Вернуться в бота</button>
+</div>
+<script async src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+    function closeWebApp() {
+        if (window.Telegram && window.Telegram.WebApp) {
+            Telegram.WebApp.close();
+        } else {
+           alert('WebApp не доступен. Этот код работает только в Telegram WebApp.');
+        }
+    }
+</script>
+{% endblock %}

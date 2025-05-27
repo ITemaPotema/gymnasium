@@ -1,0 +1,1699 @@
+Index: run.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import asyncio\r\nfrom handlers.bot_config import bot, dp\r\nfrom handlers.base import base_router\r\nfrom handlers.registration import registration_router\r\nfrom handlers.user_search import search_router\r\nfrom handlers.feeds import feed_router\r\nfrom handlers.gymcoins import gymcoins_router\r\nfrom handlers.subscriptions import options_router\r\nfrom handlers.admin import admin_router\r\nfrom handlers.anonymous_chat import chat_router\r\nfrom redis import asyncio as aioredis\r\nfrom handlers.api.admin_api import AdminApi\r\nfrom handlers.api.auth_api import AuthApi\r\nfrom aiocron import crontab\r\nfrom functools import partial\r\nfrom decouple import config\r\n\r\nasync def schedule_task():\r\n    admin_id = int(config(\"ADMIN_ID\"))\r\n    auth_api = AuthApi(admin_id)\r\n    res = await auth_api.login()\r\n    admin_api = AdminApi(admin_id, res.token)\r\n\r\n    wrapped_func = partial(admin_api.pay_to_win_posts, bot)\r\n    crontab(\"7 19 * * *\", func=wrapped_func)\r\n\r\n    # Бесконечный цикл для поддержания работы планировщика\r\n    while True:\r\n        await asyncio.sleep(1)\r\n\r\nasync def main():\r\n    dp.include_router(base_router)\r\n    dp.include_router(registration_router)\r\n    dp.include_router(search_router)\r\n    dp.include_router(feed_router)\r\n    dp.include_router(gymcoins_router)\r\n    dp.include_router(options_router)\r\n    dp.include_router(admin_router)\r\n    dp.include_router(chat_router)\r\n\r\n    redis_domain = config(\"REDIS_DOMAIN\")\r\n    password = config(\"REDIS_PASSWORD\")\r\n    admin_id = config(\"ADMIN_ID\")\r\n\r\n    redis = await aioredis.from_url(f\"redis://{redis_domain}:6379/0\", password=password, max_connections=10)\r\n\r\n    # инициализация нужных ключей и привилегий админов\r\n    async with redis.pipeline() as pipe:\r\n        pipe.multi()\r\n        pipe.set(\"bank:balance\", \"1000000000\") # баланс банка\r\n        pipe.set(f\"{admin_id}:extra\", \"10\")\r\n        pipe.rpush(f\"{admin_id}:content_list\", \"stat\")\r\n        pipe.set(f\"{admin_id}:profit\", \"1000000\")\r\n        pipe.set(\"chat_online\", \"0\")\r\n        await pipe.execute()\r\n\r\n    asyncio.create_task(schedule_task())\r\n\r\n    await bot.delete_webhook(drop_pending_updates=True)\r\n    await dp.start_polling(bot)\r\n\r\n\r\nif __name__ == \"__main__\":\r\n    asyncio.run(main())
+===================================================================
+diff --git a/run.py b/run.py
+--- a/run.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/run.py	(date 1748335059927)
+@@ -1,9 +1,10 @@
+ import asyncio
++import aiocron
+ from handlers.bot_config import bot, dp
+ from handlers.base import base_router
+ from handlers.registration import registration_router
+ from handlers.user_search import search_router
+-from handlers.feeds import feed_router
++from handlers.posts import posts_router
+ from handlers.gymcoins import gymcoins_router
+ from handlers.subscriptions import options_router
+ from handlers.admin import admin_router
+@@ -11,36 +12,24 @@
+ from redis import asyncio as aioredis
+ from handlers.api.admin_api import AdminApi
+ from handlers.api.auth_api import AuthApi
+-from aiocron import crontab
+-from functools import partial
+ from decouple import config
+-
+-async def schedule_task():
+-    admin_id = int(config("ADMIN_ID"))
+-    auth_api = AuthApi(admin_id)
+-    res = await auth_api.login()
+-    admin_api = AdminApi(admin_id, res.token)
+-
+-    wrapped_func = partial(admin_api.pay_to_win_posts, bot)
+-    crontab("7 19 * * *", func=wrapped_func)
+-
+-    # Бесконечный цикл для поддержания работы планировщика
+-    while True:
+-        await asyncio.sleep(1)
++from handlers.settings import BanCheckMiddleware
++from aiocron import crontab
+ 
+ async def main():
+     dp.include_router(base_router)
+     dp.include_router(registration_router)
+     dp.include_router(search_router)
+-    dp.include_router(feed_router)
++    dp.include_router(posts_router)
+     dp.include_router(gymcoins_router)
+     dp.include_router(options_router)
+     dp.include_router(admin_router)
+     dp.include_router(chat_router)
++    dp.message.outer_middleware(BanCheckMiddleware())
++    dp.callback_query.outer_middleware(BanCheckMiddleware())
+ 
+-    redis_domain = config("REDIS_DOMAIN")
+-    password = config("REDIS_PASSWORD")
+-    admin_id = config("ADMIN_ID")
++    redis_domain = "localhost" # config("REDIS_DOMAIN")
++    password = None # config("REDIS_PASSWORD")
+ 
+     redis = await aioredis.from_url(f"redis://{redis_domain}:6379/0", password=password, max_connections=10)
+ 
+@@ -48,17 +37,23 @@
+     async with redis.pipeline() as pipe:
+         pipe.multi()
+         pipe.set("bank:balance", "1000000000") # баланс банка
+-        pipe.set(f"{admin_id}:extra", "10")
+-        pipe.rpush(f"{admin_id}:content_list", "stat")
+-        pipe.set(f"{admin_id}:profit", "1000000")
+         pipe.set("chat_online", "0")
+         await pipe.execute()
+ 
+-    asyncio.create_task(schedule_task())
++    @crontab("0 0 * * *", start=True) # каждый день в полночь
++    async def daily_post_payments():
++        admin_id = int(config("ADMIN_ID"))
++        auth_api = AuthApi(admin_id)
++        res = await auth_api.login()
++        admin_api = AdminApi(admin_id, res.token)  # выполняем задачу от имени админа
+ 
++        await admin_api.pay_to_win_posts(bot)
++
++    print("Бот запущен")
+     await bot.delete_webhook(drop_pending_updates=True)
+     await dp.start_polling(bot)
+ 
+ 
++
+ if __name__ == "__main__":
+     asyncio.run(main())
+\ No newline at end of file
+Index: handlers/api/auth_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import aiohttp\r\nfrom redis import asyncio as aioredis\r\nimport ujson\r\nfrom dataclasses import dataclass\r\nfrom decouple import config\r\nimport enum\r\nfrom .base_api import BaseApi\r\n\r\n\r\nclass CreateStatus(enum.Enum):\r\n    SUCCESS = \"success\"\r\n    NOT_AUTHENTICATED = \"not_authenticated\"\r\n\r\n@dataclass\r\nclass CreateAnswer:\r\n    status: CreateStatus\r\n\r\n\r\nclass ProfileStatus(enum.Enum):\r\n    NO_PROFILE = \"no_profile\"\r\n    HAS_PROFILE = \"has_profile\"\r\n\r\nadmin_ids = config(\"ADMIN_IDS\")\r\n\r\n@dataclass\r\nclass TokenResult:\r\n    token: str\r\n    status: ProfileStatus\r\n    is_admin: bool = False\r\n\r\nclass AuthApi(BaseApi):\r\n    def __init__(self, tg_id):\r\n        super().__init__(tg_id)\r\n\r\n    @staticmethod\r\n    def is_admin(tg_id):\r\n        return str(tg_id) in admin_ids\r\n\r\n    async def login(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n        value = await redis.get(f\"user:{self.tg_id}:token\")\r\n\r\n        if value: # если в redis есть сохранённый токен\r\n            token = value.decode()\r\n            await redis.aclose()\r\n            return TokenResult(token=token, status=ProfileStatus.HAS_PROFILE, is_admin=AuthApi.is_admin(self.tg_id))\r\n\r\n        signature = BaseApi.generate_signature(self.tg_id, self.secret_key) # подписываем запрос общим секретным ключом\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            data = {\r\n                \"user_id\": self.tg_id,\r\n            }\r\n            headers = {\r\n                \"X-Signature\": signature\r\n            }\r\n            async with session.post(f\"{self.app_url}/sign_in\", json=data, headers=headers) as resp:\r\n                data = await resp.json()\r\n                if resp.status == 200:\r\n                    token = data[\"access_token\"]\r\n                    await redis.set(f\"user:{self.tg_id}:token\", token) # получаем и сохраняем access token в redis\r\n                    await redis.expire(f\"user:{self.tg_id}:token\", 60 * 15) # на 15 мин\r\n                    await redis.aclose()\r\n                    return TokenResult(token=token, status=ProfileStatus.HAS_PROFILE, is_admin=AuthApi.is_admin(self.tg_id))\r\n\r\n                elif resp.status == 404:\r\n                    await redis.aclose()\r\n                    return TokenResult(token=\"\", status=ProfileStatus.NO_PROFILE)\r\n\r\n                else:\r\n                    return False\r\n\r\n\r\n    async def auth_iphone(self, tg_name, vk_id):\r\n        data = {\r\n            \"tg_name\": tg_name,\r\n            \"tg_id\": self.tg_id,\r\n            \"vk_id\": vk_id\r\n        }\r\n\r\n        signature = BaseApi.generate_signature(str(self.tg_id), self.secret_key)\r\n        headers = {\"X-Signature\": signature}\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            async with session.post(f\"{self.app_url}/auth_iphone\", json=data, headers=headers) as resp:\r\n                status = resp.status\r\n                return status\r\n\r\n\r\n    async def create_profile(self, user_data):\r\n        signature = BaseApi.generate_signature(self.tg_id, self.secret_key)\r\n\r\n        headers = {\"X-Signature\": signature}\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            async with session.post(f\"{self.app_url}/create_profile\", json=user_data, headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                                        max_connections=10)\r\n                    if not AuthApi.is_admin(self.tg_id):\r\n                        await redis.set(f\"{self.tg_id}:profit\", \"0\")\r\n\r\n                    await redis.aclose()\r\n                    return CreateAnswer(status=CreateStatus.SUCCESS)\r\n\r\n                if resp.status == 401:\r\n                    return CreateAnswer(status=CreateStatus.NOT_AUTHENTICATED)\r\n\r\n\r\n
+===================================================================
+diff --git a/handlers/api/auth_api.py b/handlers/api/auth_api.py
+--- a/handlers/api/auth_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/auth_api.py	(date 1748335059932)
+@@ -20,7 +20,7 @@
+     NO_PROFILE = "no_profile"
+     HAS_PROFILE = "has_profile"
+ 
+-admin_ids = config("ADMIN_IDS")
++admin_id = config("ADMIN_ID")
+ 
+ @dataclass
+ class TokenResult:
+@@ -32,18 +32,15 @@
+     def __init__(self, tg_id):
+         super().__init__(tg_id)
+ 
+-    @staticmethod
+-    def is_admin(tg_id):
+-        return str(tg_id) in admin_ids
+-
+     async def login(self):
+-        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
++        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10, decode_responses=True)
+         value = await redis.get(f"user:{self.tg_id}:token")
+ 
+         if value: # если в redis есть сохранённый токен
+-            token = value.decode()
++            token = value
++            is_admin = await redis.sismember("admins", str(self.tg_id))
+             await redis.aclose()
+-            return TokenResult(token=token, status=ProfileStatus.HAS_PROFILE, is_admin=AuthApi.is_admin(self.tg_id))
++            return TokenResult(token=token, status=ProfileStatus.HAS_PROFILE, is_admin=bool(is_admin))
+ 
+         signature = BaseApi.generate_signature(self.tg_id, self.secret_key) # подписываем запрос общим секретным ключом
+ 
+@@ -55,13 +52,24 @@
+                 "X-Signature": signature
+             }
+             async with session.post(f"{self.app_url}/sign_in", json=data, headers=headers) as resp:
+-                data = await resp.json()
+                 if resp.status == 200:
++                    data = await resp.json()
++                    is_admin = data["is_admin"]
+                     token = data["access_token"]
++
++                    # синхронизируем redis со значением из бд
++                    if is_admin:
++                        if not await redis.sismember("admins", str(self.tg_id)):
++                            await redis.sadd("admins", str(self.tg_id))
++
++                    else:
++                        if await redis.sismember("admins", str(self.tg_id)):
++                            await redis.srem("admins", str(self.tg_id))
++
+                     await redis.set(f"user:{self.tg_id}:token", token) # получаем и сохраняем access token в redis
+                     await redis.expire(f"user:{self.tg_id}:token", 60 * 15) # на 15 мин
+                     await redis.aclose()
+-                    return TokenResult(token=token, status=ProfileStatus.HAS_PROFILE, is_admin=AuthApi.is_admin(self.tg_id))
++                    return TokenResult(token=token, status=ProfileStatus.HAS_PROFILE, is_admin=is_admin)
+ 
+                 elif resp.status == 404:
+                     await redis.aclose()
+@@ -93,12 +101,21 @@
+         headers = {"X-Signature": signature}
+ 
+         async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
+-            async with session.post(f"{self.app_url}/create_profile", json=user_data, headers=headers) as resp:
++            async with session.post(f"{self.app_url}/profile/create", json=user_data, headers=headers) as resp:
+                 if resp.status == 200:
+                     redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
+-                                                        max_connections=10)
+-                    if not AuthApi.is_admin(self.tg_id):
+-                        await redis.set(f"{self.tg_id}:profit", "0")
++                                                        max_connections=10, decode_responses=True)
++                    if not (str(self.tg_id) == admin_id): # проверка на суперадмина
++                        await redis.set(f"user:{self.tg_id}:profit", "0")
++
++                    else:
++                        async with redis.pipeline() as pipe: # создание профиля суперадмина
++                            pipe.multi()
++                            pipe.set(f"user:{self.tg_id}:extra", "10")
++                            pipe.rpush(f"user:{self.tg_id}:content_list", "stat")
++                            pipe.set(f"user:{self.tg_id}:profit", "100000")
++                            pipe.sadd(f"admins", str(self.tg_id))
++                            await pipe.execute()
+ 
+                     await redis.aclose()
+                     return CreateAnswer(status=CreateStatus.SUCCESS)
+Index: handlers/api/base_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from decouple import config\r\nimport hashlib\r\nimport hmac\r\n\r\n\r\n\r\nredis_domain = config(\"REDIS_DOMAIN\")\r\nredis_password = config(\"REDIS_PASSWORD\")\r\napp_url = config(\"APP_URL\")\r\nSECRET_KEY = config(\"SECRET_KEY\")\r\n\r\n\r\nclass BaseApi:\r\n    redis_url = f\"redis://{redis_domain}:6379/0\"\r\n    redis_password = redis_password\r\n    app_url = app_url\r\n    secret_key = SECRET_KEY\r\n\r\n    def __init__(self, tg_id):\r\n        self.tg_id = tg_id\r\n\r\n\r\n    @classmethod\r\n    def generate_signature(cls, data, secret_key):\r\n        data = str(data)\r\n        signature = hmac.new(\r\n            secret_key.encode(),\r\n            data.encode(),\r\n            hashlib.sha256\r\n        ).hexdigest()\r\n\r\n        return signature
+===================================================================
+diff --git a/handlers/api/base_api.py b/handlers/api/base_api.py
+--- a/handlers/api/base_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/base_api.py	(date 1748335059935)
+@@ -4,9 +4,9 @@
+ 
+ 
+ 
+-redis_domain = config("REDIS_DOMAIN")
+-redis_password = config("REDIS_PASSWORD")
+-app_url = config("APP_URL")
++redis_domain = "localhost" #config("REDIS_DOMAIN")
++redis_password = None # config("REDIS_PASSWORD")
++app_url = "http://localhost:8000" # config("APP_URL")
+ SECRET_KEY = config("SECRET_KEY")
+ 
+ 
+@@ -19,7 +19,7 @@
+     def __init__(self, tg_id):
+         self.tg_id = tg_id
+ 
+-
++    # функция создания подписи к запросам в api
+     @classmethod
+     def generate_signature(cls, data, secret_key):
+         data = str(data)
+Index: handlers/api/admin_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Bot\r\nimport aiohttp\r\nfrom redis import asyncio as aioredis\r\nimport ujson\r\nfrom .base_api import BaseApi\r\n\r\n\r\nclass AdminApi(BaseApi):\r\n    def __init__(self, tg_id, token=None):\r\n        super().__init__(tg_id)\r\n        self.token = token\r\n\r\n    async def set_only_negative(self, value: bool):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        await redis.set(f\"{self.tg_id}:only_negative\", int(value))\r\n        await redis.aclose()\r\n\r\n    async def only_negative(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        value = await redis.get(f\"{self.tg_id}:only_negative\")\r\n        await redis.aclose()\r\n\r\n        return int(value)\r\n\r\n    async def delete_post(self, post_id):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            params = {\"post_id\": post_id}\r\n\r\n            async with session.delete(f\"{self.app_url}/post/delete\", headers=headers, params=params) as resp:\r\n                if resp.status == 200:\r\n                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                                    max_connections=10)\r\n                    await redis.delete(f\"{post_id}:post:actions\") # вслед за постом удаляем и очередь с реакциями\r\n                    await redis.aclose()\r\n\r\n                    print(\"Пост удалён\")\r\n                    return True\r\n\r\n\r\n    async def pay_to_win_posts(self, bot: Bot):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n\r\n            async with session.get(f\"{self.app_url}/post/winners\", headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    data = await resp.json()\r\n                    amount_sent = data[\"amount_sent\"]\r\n                    users_fractions = data[\"users_fractions\"]\r\n\r\n                    async with redis.pipeline() as pipe:\r\n                        pipe.multi()\r\n                        pipe.decrby(\"bank:balance\", amount_sent)\r\n                        for user_id in users_fractions:\r\n                            prize = users_fractions[user_id][\"prize\"]\r\n                            pipe.incrby(f\"{user_id}:profit\", prize)\r\n\r\n                        await pipe.execute()\r\n\r\n                    print(f\"Ежедневные итоги: {users_fractions}\")\r\n\r\n                    for user_id in users_fractions:\r\n                        text_begin = (\r\n                            f\"Поздравляю! Один или несколько твоих постов попали в ежедневный топ 5 по лайкам!\\n\\n\"\r\n                            f\"Твои посты заняли следующие места(место: описание): \\n\")\r\n\r\n                        places = users_fractions[user_id][\"places\"]\r\n                        text_places = \"\"\r\n\r\n                        for place in places:\r\n                            post_data = places[place]\r\n                            place_text = f\"{place} место: {post_data['describe']} - {post_data['likes']}❤\\n\"\r\n                            text_places += place_text\r\n\r\n                        text_end = f\"В качестве награды на ваш счёт было зачислено {users_fractions[user_id]['prize']}\uD83D\uDC8E\"\r\n\r\n                        text = text_begin + text_places + \"\\n\" + text_end\r\n\r\n                        await bot.send_message(chat_id=user_id, text=text)\r\n\r\n                    await redis.aclose()
+===================================================================
+diff --git a/handlers/api/admin_api.py b/handlers/api/admin_api.py
+--- a/handlers/api/admin_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/admin_api.py	(date 1748335059939)
+@@ -3,27 +3,29 @@
+ from redis import asyncio as aioredis
+ import ujson
+ from .base_api import BaseApi
+-
++import time
+ 
+ class AdminApi(BaseApi):
+     def __init__(self, tg_id, token=None):
+         super().__init__(tg_id)
+         self.token = token
+ 
++    # сохранение параметра "только негативные" при просмотре постов
+     async def set_only_negative(self, value: bool):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        await redis.set(f"{self.tg_id}:only_negative", int(value))
++        await redis.set(f"user:{self.tg_id}:only_negative", int(value))
+         await redis.aclose()
+ 
+     async def only_negative(self):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        value = await redis.get(f"{self.tg_id}:only_negative")
++        value = await redis.get(f"user:{self.tg_id}:only_negative")
+         await redis.aclose()
+ 
+         return int(value)
+ 
++
+     async def delete_post(self, post_id):
+         async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
+             headers = {"Authorization": f"Bearer {self.token}"}
+@@ -57,11 +59,10 @@
+                         pipe.decrby("bank:balance", amount_sent)
+                         for user_id in users_fractions:
+                             prize = users_fractions[user_id]["prize"]
+-                            pipe.incrby(f"{user_id}:profit", prize)
++                            pipe.incrby(f"user:{user_id}:profit", prize)
+ 
+                         await pipe.execute()
+ 
+-                    print(f"Ежедневные итоги: {users_fractions}")
+ 
+                     for user_id in users_fractions:
+                         text_begin = (
+@@ -76,10 +77,70 @@
+                             place_text = f"{place} место: {post_data['describe']} - {post_data['likes']}❤\n"
+                             text_places += place_text
+ 
+-                        text_end = f"В качестве награды на ваш счёт было зачислено {users_fractions[user_id]['prize']}💎"
++                        text_end = f"В качестве награды на ваш счёт было зачислено {users_fractions[user_id]['prize']}💡"
+ 
+                         text = text_begin + text_places + "\n" + text_end
+ 
+                         await bot.send_message(chat_id=user_id, text=text)
+ 
+-                    await redis.aclose()
+\ No newline at end of file
++                    await redis.aclose()
++
++
++    async def promote_user(self, user_id: int):
++        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
++            headers = {"Authorization": f"Bearer {self.token}"}
++            data = {"tg_id": user_id}
++
++            async with session.patch(f"{self.app_url}/admin/user/promotion/upgrade", headers=headers, json=data) as resp:
++                if resp.status == 200:
++                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
++                                                    max_connections=10)
++                    await redis.sadd("admins", str(self.tg_id))
++                    await redis.delete(f"user:{user_id}:token")  # удаляем обычный токен из кэша
++
++                    return True
++
++                else:
++                    return False
++
++    async def downgrade_user(self, user_id: int):
++        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
++            headers = {"Authorization": f"Bearer {self.token}"}
++            data = {"tg_id": user_id}
++
++            async with session.patch(f"{self.app_url}/admin/user/promotion/downgrade", headers=headers, json=data) as resp:
++                if resp.status == 200:
++                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
++                                                    max_connections=10)
++                    await redis.srem("admins", str(user_id)) # удаляем из списка админов
++                    await redis.delete(f"user:{user_id}:token") # удаляем админский токен из кэша
++                    return True
++
++                else:
++                    return False
++
++    async def ban_user(self, user_id: int, duration_hours: int):
++        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
++                                        max_connections=10)
++        if duration_hours == -1: # если блокируем навсегда
++            async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
++                headers = {"Authorization": f"Bearer {self.token}"}
++                data = {"tg_id": user_id}
++
++                # удаляем профиль из бд
++                async with session.delete(f"{self.app_url}/admin/user/delete", headers=headers, json=data) as resp:
++                    if resp.status == 200:
++                        async for key in redis.scan_iter(match=f"user:{user_id}:*"): # удаляем все связанные с пользователем ключи
++                            await redis.delete(key)
++
++                    else:
++                        return False
++
++            expire_time = -1  # -1 -> пользователь забанен навсегда
++
++        else:
++           expire_time = str(int(time.time()) + duration_hours * 3600)
++
++        await redis.sadd("ban_list", f"{user_id}:{expire_time}") # добавляем пользователя в список забаненных
++        await redis.aclose()
++        return True
+Index: handlers/api/users_feed_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import aiohttp\r\nfrom redis import asyncio as aioredis\r\nimport ujson\r\nimport json\r\nfrom .base_api import BaseApi\r\n\r\n\r\nclass UserFeedApi(BaseApi):\r\n    def __init__(self, tg_id, token=None):\r\n        super().__init__(tg_id)\r\n        self.token = token\r\n\r\n    @staticmethod\r\n    async def get_users_from_db(token, app_url, form):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {token}\"}\r\n            async with session.get(f\"{app_url}/users/{form}\", headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    data = await resp.json()\r\n                    return data\r\n\r\n    async def get_users_from_form(self, form):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n        data = await redis.get(f\"users:{form}\")\r\n\r\n        if data:\r\n            return json.loads(data)\r\n\r\n        data_all_users = await UserFeedApi.get_users_from_db(self.token, self.app_url, form) # подгружаем учеников конкретного класса из бд\r\n\r\n        await redis.set(f\"users:{form}\", json.dumps(data_all_users)) # кэшируем в redis на 1 мин\r\n        await redis.expire(f\"users:{form}\", 60)\r\n\r\n        await redis.aclose()\r\n        return data_all_users\r\n\r\n    @staticmethod\r\n    async def get_users_data_feed(token, app_url, sex, form_min=6):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {token}\"}\r\n\r\n            if not sex:\r\n                params = ((\"form_min\", form_min), (\"sex\", 1), (\"sex\", 2))\r\n            else:\r\n                params = ((\"form_min\", form_min), (\"sex\", sex))\r\n\r\n            async with session.get(f\"{app_url}/users_feed\", params=params, headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    users: list = await resp.json()\r\n                    return users\r\n\r\n                return False\r\n\r\n    async def get_user_from_feed(self, sex, form_min, start=False):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        user = await redis.rpop(f\"{self.tg_id}:feed:users\")\r\n\r\n        if not user or start == True:\r\n            # получаем учеников из бд по определённым фильтрам(limit = 10 записей)\r\n            users = await UserFeedApi.get_users_data_feed(self.token, self.app_url, sex, form_min)\r\n\r\n            if start: # при старте ленты нужно очистить очередь\r\n                await redis.delete(f\"{self.tg_id}:feed:users\")\r\n\r\n            if not users:\r\n                return False\r\n\r\n            for user in users:\r\n                await redis.rpush(f\"{self.tg_id}:feed:users\", json.dumps(user)) # кэшируем в redis\r\n\r\n            user = await redis.rpop(f\"{self.tg_id}:feed:users\")\r\n\r\n        return json.loads(user)\r\n\r\n\r\n    @staticmethod\r\n    async def like_db(app_url, tg_id, token):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {token}\"}\r\n            params = {\"tg_id\": tg_id}\r\n            async with session.post(f\"{app_url}/like\", params=params, headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    return True\r\n\r\n                else:\r\n                    return False\r\n\r\n    async def like_user(self, who_id):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        pupils = await redis.lrange(f\"{self.tg_id}:donations\", 0, -1)\r\n\r\n        # проверка, что юзер не в списке недавно лайкнувших профиль self.tg_id\r\n        if pupils:\r\n            for pupil_tg_id in pupils:\r\n                if str(who_id) == pupil_tg_id.decode():\r\n                    await redis.aclose()\r\n                    return False\r\n\r\n        answer = await UserFeedApi.like_db(self.app_url, who_id, self.token) # лайк в бд\r\n\r\n        if answer:\r\n            await redis.rpush(f\"{self.tg_id}:donations\", str(who_id)) # добавление в список тех, кого лайкнул tg_id\r\n            if not pupils:\r\n                await redis.expire(f\"{self.tg_id}:donations\", 24 * 60 * 60) # через 24 часа можно будет опять лайкнуть пользователя\r\n\r\n            await redis.aclose()\r\n            return True\r\n\r\n        return False\r\n\r\n    async def check_request_history(self, receiver_id: int):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n        length = await redis.llen(f\"{self.tg_id}:recently\")\r\n        receivers = await redis.lrange(f\"{self.tg_id}:recently\", 0, -length) # получаем список тех, кому пользователь недавно отправлял заявку\r\n        await redis.aclose()\r\n\r\n        receiver_in_list = False\r\n\r\n        if receivers: # проверка, что receiver_id нет в этом списке\r\n            for receiver in receivers:\r\n                receiver = int(receiver.decode())\r\n                if receiver == receiver_id:\r\n                    receiver_in_list = True\r\n                    break\r\n\r\n        return receiver_in_list\r\n\r\n\r\n    async def send_exchange_request(self, receiver_id, sender_username, message):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        # данные заявки\r\n        data = {\r\n            \"message\": message,\r\n            \"sender_id\": self.tg_id,\r\n            \"sender_username\": sender_username\r\n        }\r\n\r\n        data_json = json.dumps(data)\r\n\r\n        await redis.lpush(f\"{receiver_id}:requests\", data_json) # сохраняем заявку в список получателя\r\n        exist = await redis.exists(f\"{self.tg_id}:recently\")\r\n\r\n        await redis.rpush(f\"{self.tg_id}:recently\", str(receiver_id)) # добавляем  получателя в список недавно отправленных заявок\r\n\r\n        if not exist:\r\n            await redis.expire(f\"{self.tg_id}:recently\", 24 * 60 * 60)\r\n        await redis.aclose()\r\n\r\n\r\n    async def get_requests(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        data_json = await redis.lpop(f\"{self.tg_id}:requests\") # извлекаем заявку из redis\r\n\r\n        if not data_json:\r\n            return False\r\n\r\n        data = json.loads(data_json)\r\n        await redis.aclose()\r\n\r\n        return data\r\n\r\n    async def get_amount_requests(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        length = await redis.llen(f\"{self.tg_id}:requests\") # узнаём количество заявок\r\n        await redis.aclose()\r\n\r\n        return length
+===================================================================
+diff --git a/handlers/api/users_feed_api.py b/handlers/api/users_feed_api.py
+--- a/handlers/api/users_feed_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/users_feed_api.py	(date 1748335059944)
+@@ -14,7 +14,7 @@
+     async def get_users_from_db(token, app_url, form):
+         async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
+             headers = {"Authorization": f"Bearer {token}"}
+-            async with session.get(f"{app_url}/users/{form}", headers=headers) as resp:
++            async with session.get(f"{app_url}/users/form/{form}", headers=headers) as resp:
+                 if resp.status == 200:
+                     data = await resp.json()
+                     return data
+@@ -44,7 +44,7 @@
+             else:
+                 params = (("form_min", form_min), ("sex", sex))
+ 
+-            async with session.get(f"{app_url}/users_feed", params=params, headers=headers) as resp:
++            async with session.get(f"{app_url}/users/feed", params=params, headers=headers) as resp:
+                 if resp.status == 200:
+                     users: list = await resp.json()
+                     return users
+@@ -54,22 +54,22 @@
+     async def get_user_from_feed(self, sex, form_min, start=False):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        user = await redis.rpop(f"{self.tg_id}:feed:users")
++        if start:
++            await redis.delete(f"user:{self.tg_id}:feed:users") # при старте ленты нужно очистить очередь
+ 
+-        if not user or start == True:
++        user = await redis.rpop(f"user:{self.tg_id}:feed:users")
++
++        if not user:
+             # получаем учеников из бд по определённым фильтрам(limit = 10 записей)
+             users = await UserFeedApi.get_users_data_feed(self.token, self.app_url, sex, form_min)
+ 
+-            if start: # при старте ленты нужно очистить очередь
+-                await redis.delete(f"{self.tg_id}:feed:users")
+-
+             if not users:
+                 return False
+ 
+             for user in users:
+-                await redis.rpush(f"{self.tg_id}:feed:users", json.dumps(user)) # кэшируем в redis
++                await redis.rpush(f"user:{self.tg_id}:feed:users", json.dumps(user)) # кэшируем в redis
+ 
+-            user = await redis.rpop(f"{self.tg_id}:feed:users")
++            user = await redis.rpop(f"user:{self.tg_id}:feed:users")
+ 
+         return json.loads(user)
+ 
+@@ -89,7 +89,7 @@
+     async def like_user(self, who_id):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        pupils = await redis.lrange(f"{self.tg_id}:donations", 0, -1)
++        pupils = await redis.lrange(f"user:{self.tg_id}:donations", 0, -1)
+ 
+         # проверка, что юзер не в списке недавно лайкнувших профиль self.tg_id
+         if pupils:
+@@ -101,9 +101,9 @@
+         answer = await UserFeedApi.like_db(self.app_url, who_id, self.token) # лайк в бд
+ 
+         if answer:
+-            await redis.rpush(f"{self.tg_id}:donations", str(who_id)) # добавление в список тех, кого лайкнул tg_id
++            await redis.rpush(f"user:{self.tg_id}:donations", str(who_id)) # добавление в список тех, кого лайкнул tg_id
+             if not pupils:
+-                await redis.expire(f"{self.tg_id}:donations", 24 * 60 * 60) # через 24 часа можно будет опять лайкнуть пользователя
++                await redis.expire(f"user:{self.tg_id}:donations", 24 * 60 * 60) # через 24 часа можно будет опять лайкнуть пользователя
+ 
+             await redis.aclose()
+             return True
+@@ -112,8 +112,8 @@
+ 
+     async def check_request_history(self, receiver_id: int):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+-        length = await redis.llen(f"{self.tg_id}:recently")
+-        receivers = await redis.lrange(f"{self.tg_id}:recently", 0, -length) # получаем список тех, кому пользователь недавно отправлял заявку
++        length = await redis.llen(f"user:{self.tg_id}:recently")
++        receivers = await redis.lrange(f"user:{self.tg_id}:recently", 0, -length) # получаем список тех, кому пользователь недавно отправлял заявку
+         await redis.aclose()
+ 
+         receiver_in_list = False
+@@ -140,20 +140,20 @@
+ 
+         data_json = json.dumps(data)
+ 
+-        await redis.lpush(f"{receiver_id}:requests", data_json) # сохраняем заявку в список получателя
+-        exist = await redis.exists(f"{self.tg_id}:recently")
++        await redis.lpush(f"user:{receiver_id}:requests", data_json) # сохраняем заявку в список получателя
++        exist = await redis.exists(f"user:{self.tg_id}:recently")
+ 
+-        await redis.rpush(f"{self.tg_id}:recently", str(receiver_id)) # добавляем  получателя в список недавно отправленных заявок
++        await redis.rpush(f"user:{self.tg_id}:recently", str(receiver_id)) # добавляем  получателя в список недавно отправленных заявок
+ 
+         if not exist:
+-            await redis.expire(f"{self.tg_id}:recently", 24 * 60 * 60)
++            await redis.expire(f"user:{self.tg_id}:recently", 24 * 60 * 60)
+         await redis.aclose()
+ 
+ 
+     async def get_requests(self):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        data_json = await redis.lpop(f"{self.tg_id}:requests") # извлекаем заявку из redis
++        data_json = await redis.lpop(f"user:{self.tg_id}:requests") # извлекаем заявку из redis
+ 
+         if not data_json:
+             return False
+@@ -166,7 +166,7 @@
+     async def get_amount_requests(self):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        length = await redis.llen(f"{self.tg_id}:requests") # узнаём количество заявок
++        length = await redis.llen(f"user:{self.tg_id}:requests") # узнаём количество заявок
+         await redis.aclose()
+ 
+         return length
+\ No newline at end of file
+Index: handlers/api/content_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from redis import asyncio as aioredis\r\nfrom decouple import config\r\nfrom .base_api import BaseApi\r\n\r\n\r\nclass ContentApi(BaseApi):\r\n    def __init__(self, tg_id):\r\n        super().__init__(tg_id)\r\n\r\n    async def buy_extra_post(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n        extra_post_cost = int(config(\"EXTRA_POST_COST\"))\r\n\r\n        user_amount = int(await redis.get(f\"{self.tg_id}:profit\"))\r\n\r\n        extra_posts_count = await redis.get(f\"{self.tg_id}:extra\")\r\n\r\n        if extra_posts_count:\r\n            extra_post_cost = extra_post_cost * (int(extra_posts_count) + 1)\r\n            # вычисляем стоимость покупки доп поста в зависимости от того сколько их у пользователя\r\n\r\n        if user_amount < extra_post_cost:\r\n            return user_amount - extra_post_cost  # сколько не хватает для покупки\r\n\r\n        async with redis.pipeline() as pipe:\r\n            pipe.multi()\r\n            if extra_posts_count:\r\n                pipe.incrby(f\"{self.tg_id}:extra\", 1)\r\n\r\n            else:\r\n                pipe.set(f\"{self.tg_id}:extra\", \"1\")\r\n\r\n            pipe.decrby(f\"{self.tg_id}:profit\", extra_post_cost)\r\n            pipe.incrby(\"bank:balance\", extra_post_cost)\r\n            await pipe.execute()\r\n            print(\"Покупка доп поста\")\r\n\r\n            return extra_post_cost\r\n\r\n    @classmethod\r\n    async def allow_content(cls, user_id,  content, redis=None):\r\n        if redis is None:\r\n            redis = await aioredis.from_url(cls.redis_url, password=cls.redis_password, max_connections=10)\r\n\r\n        user_content_list = await redis.lrange(f\"{user_id}:content_list\", 0, -1)\r\n\r\n        # проверка, что у пользователя подключена данная опция\r\n        for content_allow in user_content_list:\r\n            if content == content_allow.decode():\r\n                await redis.aclose()\r\n                return True\r\n\r\n        return False\r\n\r\n    async def buy_content(self, content):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        already_have = await ContentApi.allow_content(self.tg_id, content, redis=redis)\r\n\r\n        # если у пользователя уже есть данная опция\r\n        if already_have:\r\n            await redis.aclose()\r\n            return False\r\n\r\n        content_cost = int(config(\"CONTENT_COST\"))\r\n        amount = int(await redis.get(f\"{self.tg_id}:profit\"))\r\n\r\n        if amount < content_cost:\r\n            await redis.aclose()\r\n            return amount - content_cost  # отрицательный баланс будет сигнализировать о том, что недостаточно средств\r\n\r\n        # транзакция по покупке опции\r\n        async with redis.pipeline() as pipe:\r\n            pipe.multi()\r\n            pipe.rpush(f\"{self.tg_id}:content_list\", content)\r\n            pipe.incrby(f\"bank:balance\", content_cost)\r\n            pipe.decrby(f\"{self.tg_id}:profit\", content_cost)\r\n            await pipe.execute()\r\n            return content_cost\r\n\r\n
+===================================================================
+diff --git a/handlers/api/content_api.py b/handlers/api/content_api.py
+--- a/handlers/api/content_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/content_api.py	(date 1748335059948)
+@@ -11,9 +11,9 @@
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+         extra_post_cost = int(config("EXTRA_POST_COST"))
+ 
+-        user_amount = int(await redis.get(f"{self.tg_id}:profit"))
++        user_amount = int(await redis.get(f"user:{self.tg_id}:profit"))
+ 
+-        extra_posts_count = await redis.get(f"{self.tg_id}:extra")
++        extra_posts_count = await redis.get(f"user:{self.tg_id}:extra")
+ 
+         if extra_posts_count:
+             extra_post_cost = extra_post_cost * (int(extra_posts_count) + 1)
+@@ -25,12 +25,12 @@
+         async with redis.pipeline() as pipe:
+             pipe.multi()
+             if extra_posts_count:
+-                pipe.incrby(f"{self.tg_id}:extra", 1)
++                pipe.incrby(f"user:{self.tg_id}:extra", 1)
+ 
+             else:
+-                pipe.set(f"{self.tg_id}:extra", "1")
++                pipe.set(f"user:{self.tg_id}:extra", "1")
+ 
+-            pipe.decrby(f"{self.tg_id}:profit", extra_post_cost)
++            pipe.decrby(f"user:{self.tg_id}:profit", extra_post_cost)
+             pipe.incrby("bank:balance", extra_post_cost)
+             await pipe.execute()
+             print("Покупка доп поста")
+@@ -42,7 +42,7 @@
+         if redis is None:
+             redis = await aioredis.from_url(cls.redis_url, password=cls.redis_password, max_connections=10)
+ 
+-        user_content_list = await redis.lrange(f"{user_id}:content_list", 0, -1)
++        user_content_list = await redis.lrange(f"user:{user_id}:content_list", 0, -1)
+ 
+         # проверка, что у пользователя подключена данная опция
+         for content_allow in user_content_list:
+@@ -63,7 +63,7 @@
+             return False
+ 
+         content_cost = int(config("CONTENT_COST"))
+-        amount = int(await redis.get(f"{self.tg_id}:profit"))
++        amount = int(await redis.get(f"user:{self.tg_id}:profit"))
+ 
+         if amount < content_cost:
+             await redis.aclose()
+@@ -72,9 +72,9 @@
+         # транзакция по покупке опции
+         async with redis.pipeline() as pipe:
+             pipe.multi()
+-            pipe.rpush(f"{self.tg_id}:content_list", content)
++            pipe.rpush(f"user:{self.tg_id}:content_list", content)
+             pipe.incrby(f"bank:balance", content_cost)
+-            pipe.decrby(f"{self.tg_id}:profit", content_cost)
++            pipe.decrby(f"user:{self.tg_id}:profit", content_cost)
+             await pipe.execute()
+             return content_cost
+ 
+Index: handlers/api/profile_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Bot\r\nimport aiohttp\r\nfrom redis import asyncio as aioredis\r\nimport ujson\r\nimport json\r\nfrom .base_api import BaseApi\r\n\r\n\r\nclass UserProfileApi(BaseApi):\r\n    def __init__(self, tg_id, token):\r\n        super().__init__(tg_id)\r\n        self.token = token\r\n\r\n\r\n    async def get_profile(self):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n\r\n            async with session.get(f\"{self.app_url}/profile\", headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    profile = await resp.json()\r\n                    return profile\r\n\r\n                else:\r\n                    return False\r\n\r\n    async def edit_profile(self, data, category): # category = photo | info\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            request_data = {\"data\": data}\r\n\r\n            async with session.patch(f\"{self.app_url}/edit/{category}\", headers=headers, json=request_data) as resp:\r\n                if resp.status == 200:\r\n                    return True\r\n\r\n                return False\r\n\r\n\r\nclass ProfileProgress(BaseApi):\r\n    def __init__(self, tg_id):\r\n        super().__init__(tg_id)\r\n\r\n\r\n    async def get_profile_progress(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        data = await redis.getdel(f\"{self.tg_id}:profile_progress\")\r\n\r\n        if data:\r\n            return json.loads(data)\r\n\r\n        return False\r\n\r\n\r\n    async def save_profile_progress(self, data):\r\n        data = json.dumps(data)\r\n\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        await redis.setex(f\"{self.tg_id}:profile_progress\", 60 * 10, data)\r\n        await redis.aclose()\r\n\r\n\r\n\r\n\r\n
+===================================================================
+diff --git a/handlers/api/profile_api.py b/handlers/api/profile_api.py
+--- a/handlers/api/profile_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/profile_api.py	(date 1748335059952)
+@@ -29,11 +29,26 @@
+             headers = {"Authorization": f"Bearer {self.token}"}
+             request_data = {"data": data}
+ 
+-            async with session.patch(f"{self.app_url}/edit/{category}", headers=headers, json=request_data) as resp:
++            async with session.patch(f"{self.app_url}/profile/edit/{category}", headers=headers, json=request_data) as resp:
++                if resp.status == 200:
++                    return True
++
++                return False
++
++
++    async def deactivate_profile(self):
++        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
++            headers = {"Authorization": f"Bearer {self.token}"}
++
++            async with session.delete(f"{self.app_url}/profile/deactivate", headers=headers) as resp:
+                 if resp.status == 200:
++                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
++                    async for key in redis.scan_iter(match=f"user:{self.tg_id}:*"): # удаляем все связанные с пользователем ключи
++                        await redis.delete(key)
+                     return True
+ 
+-                return False
++                else:
++                   return False
+ 
+ 
+ class ProfileProgress(BaseApi):
+@@ -44,7 +59,7 @@
+     async def get_profile_progress(self):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        data = await redis.getdel(f"{self.tg_id}:profile_progress")
++        data = await redis.getdel(f"user:{self.tg_id}:profile_progress")
+ 
+         if data:
+             return json.loads(data)
+@@ -57,7 +72,7 @@
+ 
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        await redis.setex(f"{self.tg_id}:profile_progress", 60 * 10, data)
++        await redis.setex(f"user:{self.tg_id}:profile_progress", 60 * 10, data)
+         await redis.aclose()
+ 
+ 
+Index: handlers/subscriptions.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>\r\nfrom aiogram import Router\r\nfrom aiogram.types import CallbackQuery\r\nfrom aiogram.types import (\r\n    InlineKeyboardMarkup, InlineKeyboardButton,\r\n)\r\nfrom .api.content_api import ContentApi\r\nfrom .interface import get_options_keyboard\r\nfrom decouple import config\r\nfrom .settings import CheckAuthFilter\r\n\r\n\r\noptions_router = Router()\r\n\r\n\r\n@options_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:options\")\r\nasync def show_list_of_options(callback: CallbackQuery):\r\n    keyboard = get_options_keyboard()\r\n    await callback.message.answer(\"Здесь ты можешь купить дополнительные опции за монеты автора:\", reply_markup=keyboard)\r\n\r\n\r\n@options_router.callback_query(lambda cal: cal.data.startswith(\"option\"))\r\nasync def choose_option(callback: CallbackQuery):\r\n    option = callback.data.split(\":\")[1]\r\n    option_cost = config(\"CONTENT_COST\")\r\n    extra_post_cost = config(\"EXTRA_POST_COST\")\r\n\r\n    answers = {\r\n        \"extra_post\": \"Эта опция позволяет создавать на один пост в день больше. В отличие от других может быть куплена неоднократно, но каждый раз стоимость будет выше.\",\r\n        \"stat\": \"Эта опция позволяет видеть тех, кто поставил лайк Вашим постам. Бот пришлёт Вам файл.\\n\"\r\n                \"Внимание❗ Файл может некорректно отображаться через проводник telegram, поэтому его следует скачать на устройство и открыть через 'Загрузки'\"\r\n    }\r\n\r\n    button = [[InlineKeyboardButton(text=\"Купить\", callback_data=f\"buy:{option}\")]]\r\n    kb = InlineKeyboardMarkup(inline_keyboard=button)\r\n\r\n    cost_text = f\"Стоимость = {extra_post_cost}\uD83D\uDCA1 * n, n = кол во доп постов, которое Вы уже купили\" if option == \"extra_post\" else f\"Стоимость = {option_cost}\uD83D\uDCA1\"\r\n    text = answers[option] + \"\\n\\n\" + cost_text\r\n\r\n    await callback.message.answer(text=text, reply_markup=kb)\r\n\r\n\r\n@options_router.callback_query(lambda cal: cal.data.startswith(\"buy\"))\r\nasync def buy_option(callback: CallbackQuery):\r\n    user_id = callback.from_user.id\r\n    option = callback.data.split(\":\")[1]\r\n    content_api = ContentApi(user_id)\r\n\r\n    if option == \"extra_post\":\r\n        result = await content_api.buy_extra_post()\r\n\r\n    else:\r\n        result = await content_api.buy_content(option)\r\n\r\n    if result > 0:\r\n        await callback.message.answer(text=f\"Успешно! Списано {result}\uD83D\uDCA1\")\r\n\r\n    elif result is False:\r\n        await callback.message.answer(text=\"Эта опция уже подключена!\")\r\n\r\n    else:\r\n        await callback.message.answer(text=f\"Не хватает {-result}\uD83D\uDCA1\")\r\n\r\n\r\n\r\n
+===================================================================
+diff --git a/handlers/subscriptions.py b/handlers/subscriptions.py
+--- a/handlers/subscriptions.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/subscriptions.py	(date 1748335059955)
+@@ -13,7 +13,7 @@
+ options_router = Router()
+ 
+ 
+-@options_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:options")
++@options_router.callback_query(lambda cal: cal.data == "commands:options", CheckAuthFilter())
+ async def show_list_of_options(callback: CallbackQuery):
+     keyboard = get_options_keyboard()
+     await callback.message.answer("Здесь ты можешь купить дополнительные опции за монеты автора:", reply_markup=keyboard)
+Index: handlers/gymcoins.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Router\r\nfrom aiogram.types import Message, CallbackQuery\r\nfrom aiogram.filters import StateFilter\r\nfrom aiogram.fsm.context import FSMContext\r\nfrom aiogram.fsm.state import State, StatesGroup\r\nfrom aiogram.types import (\r\n    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,\r\n)\r\nfrom decouple import config\r\nfrom .api.gymcoins_api import GymcoinsApi\r\nfrom .interface import get_funds_keyboard\r\nfrom .settings import CheckAuthFilter\r\n\r\ngymcoins_router = Router()\r\n\r\n\r\n@gymcoins_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:wallet\")\r\nasync def welcome_funds(callback: CallbackQuery):\r\n    keyboard = get_funds_keyboard()\r\n    await callback.message.answer(text=\"Здесь вы можете выполнить основные операции с Вашими gymcoins!\", reply_markup=keyboard)\r\n\r\n\r\n@gymcoins_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"balance\")\r\nasync def get_my_balance(callback: CallbackQuery, token: str):\r\n    user_id = callback.from_user.id\r\n\r\n    gymcoins_api = GymcoinsApi(user_id, token)\r\n\r\n    balance = await gymcoins_api.get_balance()\r\n\r\n    if balance is False:\r\n        await callback.message.answer(\"Не могу посчитать средства(\")\r\n        return\r\n\r\n    await callback.message.answer(f\"Баланс: {balance} \uD83D\uDC8E\")\r\n\r\nclass WithdrawalStates(StatesGroup):\r\n    withdraw = State()\r\n\r\n@gymcoins_router.callback_query(lambda cal: cal.data == \"author_wallet\")\r\nasync def get_author_wallet(callback: CallbackQuery):\r\n    user_id = callback.from_user.id\r\n    gymcoins_api = GymcoinsApi(user_id)\r\n\r\n    profit = await gymcoins_api.get_profit()\r\n\r\n    if profit == 0:\r\n        await callback.message.answer(text=\"Доступно к выводу: 0\uD83D\uDCA1\")\r\n        return\r\n\r\n    button = [[InlineKeyboardButton(text=\"Вывести \uD83D\uDCA1->\uD83D\uDC8E\", callback_data=\"вывести\")]]\r\n    keyboard = InlineKeyboardMarkup(inline_keyboard=button)\r\n\r\n    await callback.message.answer(text=f\"Доcтупно к выводу: {profit}\uD83D\uDCA1\", reply_markup=keyboard)\r\n\r\n\r\n\r\n@gymcoins_router.callback_query(lambda cal: cal.data.startswith(\"вывести\"))\r\nasync def get_sum_withdraw(callback: CallbackQuery, state: FSMContext):\r\n    button = [[InlineKeyboardButton(text=\"Отменить вывод\", callback_data=\"cancel_withdraw\")]]\r\n    kb = InlineKeyboardMarkup(inline_keyboard=button)\r\n\r\n    await callback.message.answer(text=\"❗ Дополнительные опции можно купить ТОЛЬКО за \uD83D\uDCA1, а не \uD83D\uDC8E!\"\r\n                                       \" Так что будьте до конца уверены перед тем, как выводить \uD83D\uDCA1 на общий баланс.\", reply_markup=kb)\r\n    await callback.message.answer(text=\"Введи сумму, которую хочешь вывести:\")\r\n    await state.set_state(WithdrawalStates.withdraw)\r\n\r\n\r\n@gymcoins_router.callback_query(lambda cal: cal.data == \"cancel_withdraw\")\r\nasync def cancel_withdraw(callback: CallbackQuery, state: FSMContext):\r\n    await callback.message.answer(text=\"Отменяю процесс.\")\r\n    await state.clear()\r\n\r\n@gymcoins_router.message(CheckAuthFilter(), StateFilter(WithdrawalStates.withdraw))\r\nasync def withdraw_profit(message: Message, state: FSMContext, token: str):\r\n    if not message.text.isdigit():\r\n        await message.answer(\"Введи число!\")\r\n        return\r\n\r\n    amount = int(message.text)\r\n\r\n    user_id = message.from_user.id\r\n    gymcoins_api = GymcoinsApi(user_id, token)\r\n\r\n    result = await gymcoins_api.withdraw_funds(amount, \"profit\")\r\n\r\n    if result:\r\n        await message.answer(\"Успешно!\")\r\n\r\n    else:\r\n        await message.answer(\"Недостаточно средств к выводу!\")\r\n\r\n    await state.clear()\r\n\r\n@gymcoins_router.callback_query(lambda cal: cal.data == \"explain\")\r\nasync def explain_balances(callback: CallbackQuery):\r\n    text = (\"Работает это так: \\n\\n\"\r\n            \"Вы тапаете Gymcoins\uD83D\uDC8E, они отправляются на основной баланс(Баланс).\"\r\n            \"Средства с основного баланса расходуются на создание новых постов. \\n\\n\"\r\n            \"Средства в кошельке автора\uD83D\uDCA1 - это те средства, которые заработали для Вас Ваши посты(лайки).\"\r\n            \"Их Вы можете потратить на покупку опций, а также на создание гс и кружочков.\"\r\n            \"Средства из кошелька автора можно вывести на основной баланс, однако наоборот сделать не получится.\")\r\n\r\n    await callback.message.answer(text=text)\r\n\r\n\r\n@gymcoins_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:maining\")\r\nasync def start_app(callback: CallbackQuery):\r\n    btn = [[InlineKeyboardButton(text=\"Начать майнинг\", web_app=WebAppInfo(url=f'{config(\"APP_URL\")}/gymcoins'))]]\r\n    keyboard = InlineKeyboardMarkup(inline_keyboard=btn)\r\n\r\n    await callback.message.answer(text=\"Начинайте майнить прямо сейчас!\", reply_markup=keyboard)\r\n
+===================================================================
+diff --git a/handlers/gymcoins.py b/handlers/gymcoins.py
+--- a/handlers/gymcoins.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/gymcoins.py	(date 1748335059960)
+@@ -14,13 +14,13 @@
+ gymcoins_router = Router()
+ 
+ 
+-@gymcoins_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:wallet")
++@gymcoins_router.callback_query(lambda cal: cal.data == "commands:wallet", CheckAuthFilter())
+ async def welcome_funds(callback: CallbackQuery):
+     keyboard = get_funds_keyboard()
+     await callback.message.answer(text="Здесь вы можете выполнить основные операции с Вашими gymcoins!", reply_markup=keyboard)
+ 
+ 
+-@gymcoins_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "balance")
++@gymcoins_router.callback_query(lambda cal: cal.data == "balance", CheckAuthFilter())
+ async def get_my_balance(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+ 
+@@ -71,7 +71,7 @@
+     await callback.message.answer(text="Отменяю процесс.")
+     await state.clear()
+ 
+-@gymcoins_router.message(CheckAuthFilter(), StateFilter(WithdrawalStates.withdraw))
++@gymcoins_router.message(StateFilter(WithdrawalStates.withdraw), CheckAuthFilter())
+ async def withdraw_profit(message: Message, state: FSMContext, token: str):
+     if not message.text.isdigit():
+         await message.answer("Введи число!")
+@@ -104,9 +104,13 @@
+     await callback.message.answer(text=text)
+ 
+ 
+-@gymcoins_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:maining")
++@gymcoins_router.callback_query(lambda cal: cal.data == "commands:maining", CheckAuthFilter())
+ async def start_app(callback: CallbackQuery):
+-    btn = [[InlineKeyboardButton(text="Начать майнинг", web_app=WebAppInfo(url=f'{config("APP_URL")}/gymcoins'))]]
++    text = ("Начинайте майнить прямо сейчас, но учтите, что: \n"
++            "❗ При закрытии страницы счётчик gymcoins обнуляется, так что не забывайте выводить их на баланс(save) после сессии майнинга. \n"
++            "❗ Мин сумма вывода за РАЗ = 100 gymcoins, макс = 10000")
++
++    btn = [[InlineKeyboardButton(text="майнить💎", web_app=WebAppInfo(url=f'http://localhost:8000/gymcoins'))]] # config("APP_URL")
+     keyboard = InlineKeyboardMarkup(inline_keyboard=btn)
+ 
+-    await callback.message.answer(text="Начинайте майнить прямо сейчас!", reply_markup=keyboard)
++    await callback.message.answer(text=text, reply_markup=keyboard)
+Index: handlers/anonymous_chat.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Router\r\nfrom aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup\r\nfrom aiogram.filters import Command, Filter\r\nfrom .bot_config import bot\r\nfrom .interface import get_cancel_kb, get_chat_kb\r\nfrom .api.chat_api import ChatApi, SearchStatus\r\nfrom .settings import CheckAuthFilter\r\n\r\nchat_router = Router()\r\n\r\n@chat_router.message(Command(\"chat\"))\r\nasync def start_anonymous_chat(message: Message):\r\n    user_id = message.from_user.id\r\n    chat_api = ChatApi(user_id)\r\n    online = await chat_api.get_online()\r\n\r\n    kb = get_chat_kb(online=online)\r\n    await message.answer(\"Добро пожаловать в анонимный чат 587!\", reply_markup=kb)\r\n\r\n\r\n@chat_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"chat:search\")\r\nasync def search_dialog_partner(callback: CallbackQuery):\r\n    user_id = callback.from_user.id\r\n    chat_api = ChatApi(user_id)\r\n    result = await chat_api.search_user_to_chat()\r\n\r\n    if result.status == SearchStatus.SUCCESS:\r\n        partner_id = result.partner_id\r\n\r\n        text = \"Собеседник найден! Начинайте общение.\"\r\n        btn = [[KeyboardButton(text=\"Закончить беседу\uD83D\uDED1\")]]\r\n        kb = ReplyKeyboardMarkup(keyboard=btn, resize_keyboard=True)\r\n\r\n        await callback.message.answer(text=text, reply_markup=kb)\r\n        await bot.send_message(chat_id=partner_id, text=text, reply_markup=kb)\r\n\r\n    if result.status == SearchStatus.ALREADY_EXIST:\r\n        await callback.message.answer(text=\"Вы уже состоите в активном чате!\")\r\n\r\n    if result.status == SearchStatus.WAITING:\r\n        kb = get_cancel_kb()\r\n\r\n        await callback.message.answer(text=\"Ищу собеседника\uD83D\uDD0D...\", reply_markup=kb)\r\n\r\n\r\n\r\n@chat_router.callback_query(lambda cal: cal.data == \"chat:cancel\")\r\nasync def cancel_chat_waiting(callback: CallbackQuery):\r\n    user_id = callback.from_user.id\r\n    chat_api = ChatApi(user_id)\r\n\r\n    await chat_api.cancel_waiting()\r\n    await callback.message.answer(text=\"Вы вышли из очереди.\")\r\n\r\n\r\nclass HasActiveChatFilter(Filter):\r\n    async def __call__(self, message: Message):\r\n        user_id = message.from_user.id\r\n        chat_api = ChatApi(user_id)\r\n\r\n        partner_id = await chat_api.get_partner_id()\r\n\r\n        if not partner_id:\r\n            return False\r\n\r\n        return {\"partner_id\": partner_id, \"chat_api\": chat_api}\r\n\r\n\r\n@chat_router.message(HasActiveChatFilter(), lambda mes: mes.text == \"Закончить беседу\uD83D\uDED1\")\r\nasync def finish_dialog(message: Message, partner_id: int, chat_api: ChatApi):\r\n    await chat_api.stop_chat(partner_id)\r\n    online = await chat_api.get_online()\r\n    kb = get_chat_kb(online=online)\r\n\r\n    await bot.send_message(chat_id=partner_id, text=\"Собеседник остановил диалог с Вами!\uD83D\uDED1\", reply_markup=ReplyKeyboardRemove())\r\n    await bot.send_message(chat_id=partner_id, text=\"Найти нового собеседника?\", reply_markup=kb)\r\n    await message.answer(text=\"Беседа завершена!\", reply_markup=ReplyKeyboardRemove())\r\n    await message.answer(text=\"Найти нового собеседника?\", reply_markup=kb)\r\n\r\n\r\n@chat_router.message(HasActiveChatFilter())\r\nasync def chatting(message: Message, partner_id: int):\r\n    if not message.text:\r\n        await message.answer(text=\"Можно отправлять только текстовые сообщения!\")\r\n        return\r\n\r\n    await bot.send_message(chat_id=partner_id, text=message.text)\r\n
+===================================================================
+diff --git a/handlers/anonymous_chat.py b/handlers/anonymous_chat.py
+--- a/handlers/anonymous_chat.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/anonymous_chat.py	(date 1748335059967)
+@@ -15,10 +15,10 @@
+     online = await chat_api.get_online()
+ 
+     kb = get_chat_kb(online=online)
+-    await message.answer("Добро пожаловать в анонимный чат 587!", reply_markup=kb)
++    await message.answer("Добро пожаловать в анонимный чат!", reply_markup=kb)
+ 
+ 
+-@chat_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "chat:search")
++@chat_router.callback_query(lambda cal: cal.data == "chat:search", CheckAuthFilter())
+ async def search_dialog_partner(callback: CallbackQuery):
+     user_id = callback.from_user.id
+     chat_api = ChatApi(user_id)
+Index: handlers/api/chat_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Bot\r\nimport aiohttp\r\nfrom redis import asyncio as aioredis\r\nfrom dataclasses import dataclass\r\nfrom .base_api import BaseApi\r\nimport enum\r\n\r\nclass SearchStatus(enum.Enum):\r\n    ALREADY_EXIST = \"already_exist\"\r\n    WAITING = \"waiting\"\r\n    SUCCESS = \"success\"\r\n\r\n@dataclass\r\nclass SearchChatResult:\r\n    status: SearchStatus\r\n    partner_id: int = None\r\n\r\nclass ChatApi(BaseApi):\r\n    def __init__(self, tg_id):\r\n        super().__init__(tg_id)\r\n\r\n    async def search_user_to_chat(self) -> SearchChatResult:\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                      decode_responses=True)\r\n\r\n        # Проверяем, есть ли уже активный чат\r\n        if await redis.hexists(\"active_chats\", str(self.tg_id)):\r\n            await redis.aclose()\r\n            return SearchChatResult(status=SearchStatus.ALREADY_EXIST)\r\n\r\n        # Достаём партнёра из очереди\r\n        partner_id = await redis.lpop(\"search_queue\")\r\n\r\n        if partner_id:\r\n            partner_id = int(partner_id)\r\n\r\n            # Проверяем, что партнёр ещё не в другом чате\r\n            if await redis.hexists(\"active_chats\", partner_id):\r\n                # Если партнёр уже в чате, возвращаем его в очередь\r\n                await redis.rpush(\"search_queue\", partner_id)\r\n                await redis.aclose()\r\n                return SearchChatResult(status=SearchStatus.WAITING)\r\n\r\n            async with redis.pipeline() as pipe:\r\n                pipe.multi()\r\n                pipe.hset(\"active_chats\", str(self.tg_id), partner_id)\r\n                pipe.hset(\"active_chats\", str(partner_id), self.tg_id)\r\n                pipe.incrby(\"chat_online\", 2)\r\n                await pipe.execute()\r\n\r\n            await redis.aclose()\r\n            return SearchChatResult(status=SearchStatus.SUCCESS, partner_id=partner_id)\r\n\r\n        else:\r\n            # Если партнёра нет, добавляем себя в очередь\r\n            await redis.rpush(\"search_queue\", self.tg_id)\r\n            await redis.aclose()\r\n            return SearchChatResult(status=SearchStatus.WAITING)\r\n\r\n    async def get_online(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                      decode_responses=True)\r\n        return await redis.get(\"chat_online\")\r\n\r\n    async def stop_chat(self, partner_id: int) -> bool:\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                      decode_responses=True)\r\n        try:\r\n            async with redis.pipeline() as pipe:\r\n                pipe.multi()\r\n                pipe.hdel(\"active_chats\", str(self.tg_id))\r\n                pipe.hdel(\"active_chats\", str(partner_id))\r\n                pipe.decrby(\"chat_online\", 2)\r\n                await pipe.execute()\r\n            return True\r\n\r\n        except Exception as e:\r\n            print(f\"Ошибка при удалении чата: {e}\")\r\n            return False\r\n        finally:\r\n            await redis.aclose()\r\n\r\n    async def cancel_waiting(self) -> bool:\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                      decode_responses=True)\r\n        try:\r\n            await redis.lrem(\"search_queue\", 0, str(self.tg_id))\r\n            return True\r\n        except Exception as e:\r\n            print(f\"Ошибка при отмене поиска: {e}\")\r\n            return False\r\n        finally:\r\n            await redis.aclose()\r\n\r\n    async def get_partner_id(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                      decode_responses=True)\r\n        try:\r\n            partner_id = await redis.hget(\"active_chats\", str(self.tg_id))\r\n            return int(partner_id) if partner_id else None\r\n        except Exception as e:\r\n            print(f\"Ошибка при получении partner_id: {e}\")\r\n            return None\r\n        finally:\r\n            await redis.aclose()\r\n
+===================================================================
+diff --git a/handlers/api/chat_api.py b/handlers/api/chat_api.py
+--- a/handlers/api/chat_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/chat_api.py	(date 1748335059971)
+@@ -34,13 +34,6 @@
+         if partner_id:
+             partner_id = int(partner_id)
+ 
+-            # Проверяем, что партнёр ещё не в другом чате
+-            if await redis.hexists("active_chats", partner_id):
+-                # Если партнёр уже в чате, возвращаем его в очередь
+-                await redis.rpush("search_queue", partner_id)
+-                await redis.aclose()
+-                return SearchChatResult(status=SearchStatus.WAITING)
+-
+             async with redis.pipeline() as pipe:
+                 pipe.multi()
+                 pipe.hset("active_chats", str(self.tg_id), partner_id)
+@@ -65,6 +58,9 @@
+     async def stop_chat(self, partner_id: int) -> bool:
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
+                                       decode_responses=True)
++        if not await redis.hexists("active_chats", str(self.tg_id)): # если чат уже удалён
++            return True
++
+         try:
+             async with redis.pipeline() as pipe:
+                 pipe.multi()
+@@ -72,6 +68,7 @@
+                 pipe.hdel("active_chats", str(partner_id))
+                 pipe.decrby("chat_online", 2)
+                 await pipe.execute()
++
+             return True
+ 
+         except Exception as e:
+Index: handlers/feeds.py
+===================================================================
+diff --git a/handlers/feeds.py b/handlers/posts.py
+rename from handlers/feeds.py
+rename to handlers/posts.py
+--- a/handlers/feeds.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/posts.py	(date 1748335059985)
+@@ -14,7 +14,7 @@
+ from .interface import get_post_keyboard, get_choose_post_type_kb, get_post_stat_kb, only_negative_kb
+ from decouple import config
+ 
+-feed_router = Router()
++posts_router = Router()
+ 
+ class PostCreateStates(StatesGroup):
+     start_dialog = State()
+@@ -23,7 +23,7 @@
+     post_describe = State()
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:create_post")
++@posts_router.callback_query(lambda cal: cal.data == "commands:create_post", CheckAuthFilter())
+ async def post_create(callback: CallbackQuery, state: FSMContext):
+     post_cost = config("POST_COST_CREATE")
+     like_cost = int(config("LIKE_COST"))
+@@ -33,7 +33,7 @@
+     text = ("Здесь вы можете создать пост! \n\n"
+             "Тарифы:\n"        
+             f"Стоимость поста типа текст/фото: {post_cost}💎\n"
+-            f"Стоимость поста типа голосовое/кружочек: {advance_cost}💡\n"
++            f"Стоимость поста типа голосовое/кружочек/видео: {advance_cost}💡\n"
+             f"1❤ Вашему посту = {like_cost}💡")
+ 
+     button = [[InlineKeyboardButton(text="Создать пост🔥", callback_data="create_post")]]
+@@ -44,7 +44,7 @@
+     await state.set_state(PostCreateStates.start_dialog)
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "create_post")
++@posts_router.callback_query(lambda cal: cal.data == "create_post", CheckAuthFilter())
+ async def ask_content_type(callback: CallbackQuery, state: FSMContext, token: str):
+     user_id = callback.from_user.id
+ 
+@@ -60,7 +60,7 @@
+     await callback.message.answer(text="Выбери тип поста:", reply_markup=get_choose_post_type_kb())
+     await state.set_state(PostCreateStates.post_type)
+ 
+-@feed_router.callback_query(StateFilter(PostCreateStates.post_type))
++@posts_router.callback_query(StateFilter(PostCreateStates.post_type))
+ async def get_content_type(callback: CallbackQuery, state: FSMContext):
+     post_type = callback.data
+ 
+@@ -68,7 +68,8 @@
+                 "text": "Отправь текст поста:",
+                 "text_photo": "Отправь фото с текстом или просто фото:",
+                 "voice": "Отправь голосовое сообщение:",
+-                "circle": "Отправь кружочек:"
++                "circle": "Отправь кружочек:",
++                "video": "Отправь мне видео и текст к нему(по желанию):"
+             }
+ 
+ 
+@@ -77,7 +78,7 @@
+     await state.set_state(PostCreateStates.post_content)
+ 
+ 
+-@feed_router.message(StateFilter(PostCreateStates.post_content))
++@posts_router.message(StateFilter(PostCreateStates.post_content))
+ async def get_content(message: Message, state: FSMContext):
+     content_type = (await state.get_data())["type"]
+ 
+@@ -116,7 +117,15 @@
+         video_note_id = message.video_note.file_id
+         await state.update_data(content=video_note_id, text="")
+ 
++    elif content_type == "video":
++        if not message.video:
++            await message.answer("Пришли мне видео!")
++            return
+ 
++        video = message.video
++        video_id = video.file_id
++        caption = message.caption if message.caption else ""
++        await state.update_data(content=video_id, text=caption)
+ 
+     await message.answer(text="Теперь введи краткое описание поста. \n"
+                               "Это позволит Вам понять о каком посте идёт речь при просмотре статистики")
+@@ -124,7 +133,7 @@
+     await state.set_state(PostCreateStates.post_describe)
+ 
+ 
+-@feed_router.message(CheckAuthFilter(), StateFilter(PostCreateStates.post_describe))
++@posts_router.message(StateFilter(PostCreateStates.post_describe), CheckAuthFilter())
+ async def get_post_describe(message: Message, state: FSMContext, token: str):
+     user_id = message.from_user.id
+     post_api = PostsApi(user_id, token)
+@@ -146,7 +155,7 @@
+     type = data["type"]
+ 
+ 
+-    if type in ("voice", "circle"):
++    if type in ("voice", "circle", "video"):
+         advance = True
+ 
+     else:
+@@ -173,12 +182,12 @@
+     await state.clear()
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:posts")
++@posts_router.callback_query(lambda cal: cal.data == "commands:posts", CheckAuthFilter())
+ async def start_post_feed(callback: CallbackQuery, is_admin: bool):
+     user_id = callback.from_user.id
+     posts_api = PostsApi(user_id)
+ 
+-    await posts_api.delete_posts_in_cash() # удаляем старые посты из кэша
++    await posts_api.delete_posts_in_cache() # удаляем старые посты из кэша
+ 
+     if is_admin:
+         kb = only_negative_kb()
+@@ -195,7 +204,7 @@
+ 
+ 
+ 
+-@feed_router.callback_query(lambda cal: cal.data.startswith("negative"))
++@posts_router.callback_query(lambda cal: cal.data.startswith("negative"))
+ async def apply_toxicity(callback: CallbackQuery):
+     admin_id = callback.from_user.id
+     admin_api = AdminApi(admin_id)
+@@ -217,7 +226,7 @@
+     await callback.message.answer(text="Начать просмотр:", reply_markup=keyboard)
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "next_post" or  cal.data.startswith("like") or cal.data.startswith("dislike"))
++@posts_router.callback_query(lambda cal: cal.data == "next_post" or  cal.data.startswith("like") or cal.data.startswith("dislike"), CheckAuthFilter())
+ async def get_post(callback: CallbackQuery, token: str, is_admin: bool):
+     user_id = callback.from_user.id
+ 
+@@ -226,7 +235,7 @@
+     if callback.data != "next_post":
+         cal_data = callback.data.split(":")
+         action = cal_data[0] # ❤ или 👎
+-        post_id = cal_data[1]
++        post_id = int(cal_data[1])
+         creator_id = cal_data[4]
+         post_type = cal_data[5]
+ 
+@@ -241,7 +250,7 @@
+             else:
+                 dislikes += 1
+ 
+-            keyboard = get_post_keyboard(user_id, likes, dislikes, post_id, creator_id, post_type)
++            keyboard = get_post_keyboard(likes, dislikes, post_id, creator_id, post_type, is_admin)
+ 
+             await callback.message.edit_reply_markup(caption=callback.message.caption, reply_markup=keyboard)
+ 
+@@ -275,7 +284,7 @@
+         "non-toxic": "Нейтральность"
+     }
+ 
+-    keyboard = get_post_keyboard(user_id, likes, dislikes, post_id, creator_id, post_type)
++    keyboard = get_post_keyboard(likes, dislikes, post_id, creator_id, post_type, is_admin)
+ 
+     label = translate_toxicity[toxicity] if toxicity else "Не определено"
+ 
+@@ -291,11 +300,14 @@
+     elif post_type == "voice":
+         await callback.message.answer_voice(voice=content, reply_markup=keyboard)
+ 
++    elif post_type == "circle":
++        await callback.message.answer_video_note(video_note=content, reply_markup=keyboard)
++
+     else:
+-        await callback.message.answer_video_note(video_note=content, reply_markup=keyboard)
++        await callback.message.answer_video(video=content, caption=post_text, reply_markup=keyboard)
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:stat")
++@posts_router.callback_query(lambda cal: cal.data == "commands:stat", CheckAuthFilter())
+ async def stat_next_post(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+ 
+@@ -311,11 +323,13 @@
+     btn = [[InlineKeyboardButton(text="Смотреть статиcтику", callback_data=f"stat:0:{limit}")]]
+     kb = InlineKeyboardMarkup(inline_keyboard=btn)
+ 
+-    await callback.message.answer(text="Здесь ты можешь посмотреть статистику своих постов.", reply_markup=kb)
++    text = "Продолжить просмотр статистики:" if callback.message.reply_markup.inline_keyboard[0][0].text == "Далее" else "Здесь ты можешь посмотреть статистику своих постов."
+ 
++    await callback.message.answer(text=text, reply_markup=kb)
+ 
+ 
+-@feed_router.callback_query(lambda cal: cal.data.startswith("stat"))
++
++@posts_router.callback_query(lambda cal: cal.data.startswith("stat"))
+ async def get_stat(callback: CallbackQuery):
+     user_id = callback.from_user.id
+     cal_data = callback.data.split(":")
+@@ -327,7 +341,7 @@
+ 
+     post_data = await post_api.get_post_stat(offset=offset)
+ 
+-    post_types = {"text": "текст", "text_photo": "текст+фото", "voice": "голосовое", "circle": "кружочек"}
++    post_types = {"text": "текст", "text_photo": "текст+фото", "voice": "голосовое", "circle": "кружочек", "video": "видео"}
+ 
+     post_id = post_data["post_id"]
+     describe = post_data["describe"]
+@@ -344,7 +358,7 @@
+     await callback.message.edit_text(text=stat_text, reply_markup=keyboard)
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data.startswith("user_delete"))
++@posts_router.callback_query(lambda cal: cal.data.startswith("user_delete_post"), CheckAuthFilter())
+ async def delete_post_user(callback: CallbackQuery, token: str):
+     post_id = int(callback.data.split(":")[1])
+     user_id = callback.from_user.id
+@@ -352,14 +366,17 @@
+     post_api = PostsApi(user_id, token=token)
+     delete_result = await post_api.delete_post(post_id)
+ 
++    btn = [[InlineKeyboardButton(text="Далее", callback_data="commands:stat")]]
++    kb = InlineKeyboardMarkup(inline_keyboard=btn)
++
+     if delete_result:
+-        await callback.message.answer("Пост успешно удалён✅")
++        await callback.message.edit_text("Пост успешно удалён✅", reply_markup=kb)
+ 
+     else:
+         await callback.message.answer("Ошибка! Не могу удалить пост❌")
+ 
+ 
+-@feed_router.callback_query(CheckAuthFilter(), lambda cal: cal.data.startswith("list_likers"))
++@posts_router.callback_query(lambda cal: cal.data.startswith("list_likers"), CheckAuthFilter())
+ async def get_likers_list(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+     post_id = int(callback.data.split(":")[1])
+Index: handlers/base.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Router\r\nfrom aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery\r\nfrom aiogram.filters import Command\r\nfrom aiogram.fsm.context import FSMContext\r\nfrom .interface import get_support_keyboard, get_stars_keyboard, get_post_commands, get_search_commands, get_profile_commands\r\nfrom decouple import config\r\nimport asyncio\r\n\r\nbase_router = Router()\r\n\r\n\r\n@base_router.message(Command(\"start\"))\r\nasync def greeting_with_user(message: Message):\r\n    text =(\"Добро пожаловать в 'Gymnasium'!\\n\\n\"\r\n            \"Это платформа для знакомств и новостей учеников нашей гимназии\\n\"\r\n            \"Скорее осваивайся и стань настоящей легендой нашей Гимназии!\\n\\n\"\r\n            \"/help - поможет в освоении\"\r\n           )\r\n\r\n    await message.answer(text=text)\r\n\r\n\r\n\r\n@base_router.message(Command(\"cancel\"))\r\nasync def cancel_state(message: Message, state: FSMContext):\r\n    await message.answer(\"Все состояния сброшены.\")\r\n    await state.clear()\r\n\r\n\r\n@base_router.message(Command(\"support\"))\r\nasync def ask_support(message: Message):\r\n    keyboard = get_support_keyboard()\r\n\r\n    text = (\"Дорогой пользователь!\\n\\n Спасибо, за интерес, проявленный к данному проекту.\\n\"\r\n            \"Будем рады любой финансовой от Вас помощи. Если Вам действительно нравится этот проект, и Вы хотите облегчить его финансовое содержание, можете помочь двумя способами:\"\r\n           )\r\n\r\n    await message.answer(text=text, reply_markup=keyboard)\r\n\r\n\r\n@base_router.callback_query(lambda cal: cal.data.startswith(\"support\"))\r\nasync def send_support_agree(callback: CallbackQuery):\r\n    type_support = callback.data.split(\":\")[1]\r\n\r\n    if type_support == \"stars\":\r\n        prices = [LabeledPrice(label=\"XTR\", amount=100)]\r\n        await callback.message.answer_invoice(\r\n            title=\"Поддержать проект\",\r\n            description=\"Поддержать проект на 100 звёзд!\",\r\n            prices=prices,\r\n            provider_token=\"\",\r\n            payload=\"channel_support\",\r\n            currency=\"XTR\",\r\n            reply_markup=get_stars_keyboard(),\r\n        )\r\n\r\n    else:\r\n        credit_card = config(\"CREDIT_CARD\")\r\n        await callback.message.answer(f\"Т-Банк: {credit_card}\")\r\n\r\n\r\n@base_router.pre_checkout_query()\r\nasync def pre_check(pre_checkout_query: PreCheckoutQuery):\r\n    await pre_checkout_query.answer(ok=True)\r\n\r\n\r\n@base_router.message(lambda mes: mes.successful_payment is True)\r\nasync def say_thanks(message: Message):\r\n    await message.answer(text=\"Спасибо за вашу поддержку!\uD83E\uDD17\uD83D\uDE4F❤\")\r\n\r\n\r\n@base_router.message(Command(\"personal\"))\r\nasync def profile_abilities(message: Message):\r\n    keyboard = get_profile_commands()\r\n\r\n    await message.answer(text=\"Личное:\", reply_markup=keyboard)\r\n\r\n\r\n@base_router.message(Command(\"pupils\"))\r\nasync def pupils_abilities(message: Message):\r\n    keyboard = get_search_commands()\r\n\r\n    await message.answer(text=\"Знакомства и поиск учеников:\", reply_markup=keyboard)\r\n\r\n\r\n@base_router.message(Command(\"posts\"))\r\nasync def pupils_abilities(message: Message):\r\n    keyboard = get_post_commands()\r\n\r\n    await message.answer(text=\"Операции с постами:\", reply_markup=keyboard)\r\n\r\n\r\n\r\n@base_router.message(Command(\"help\"))\r\nasync def help_information(message: Message):\r\n    text = (\"Ещё раз привет! Это памятка расскажет тебе об основных функциях платформы:\\n\\n\"\r\n            \"1. Пройди авторизацию(/authorization) и создай личный профиль(/personal).\\n\\n\"\r\n            \"2. /pupils - поиск ученика по классам, а также лента из учеников нашей Гимназии. \\n\\n\"\r\n            \"3. /posts - создание постов, об этом подробнее:\\n\"\r\n            \"Всё завязано на виртуальной валюте нашей Гимназии Gymcoins\uD83D\uDC8E, суть вот в чём:\\n\"\r\n            \"Вы тапаете \uD83D\uDC8E -> тратите на создание постов.\\n\"\r\n            \"За лайки автор поcта получает специальную валюту \uD83D\uDCA1, баланс которой пользователь может посмотреть в 'Кошельке автора'.\\n\"\r\n            \"Её он может либо конвертировать в \uD83D\uDC8E, либо потратить на создания спец постов(гс или кружочки) или на покупку опций.\\n\")\r\n\r\n    await message.answer(text=text)\r\n\r\n\r\n@base_router.message(Command(\"about\"))\r\nasync def about_me(message: Message):\r\n    channel_url = config(\"MY_CHANNEL\")\r\n    text = (f\"Если Вам интересен данный проект, подписывайтесь на канал: {channel_url}\\n\"\r\n            f\"В нём ты найдёшь информацию о будущих обновлениях, а также интересные факты о его создании.\\n\"\r\n            f\"Ты можешь предложить свои идеи и мы обязательно их рассмотрим.\\n\"\r\n            f\"Сделаем вместе ЛУЧШУЮ школьную платформу!\")\r\n\r\n    await message.answer(text=text)\r\n\r\n\r\n\r\n\r\n\r\n
+===================================================================
+diff --git a/handlers/base.py b/handlers/base.py
+--- a/handlers/base.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/base.py	(date 1748335059974)
+@@ -12,13 +12,22 @@
+ @base_router.message(Command("start"))
+ async def greeting_with_user(message: Message):
+     text =("Добро пожаловать в 'Gymnasium'!\n\n"
+-            "Это платформа для знакомств и новостей учеников нашей гимназии\n"
+-            "Скорее осваивайся и стань настоящей легендой нашей Гимназии!\n\n"
++            "Это платформа для школьных новостей и знакомств.\n"
++            "Скорее осваивайся и стань настоящей легендой школы!\n\n"
+             "/help - поможет в освоении"
+            )
+ 
+     await message.answer(text=text)
+ 
++    special_user_id = int(config("SPECIAL_ID"))
++
++    if message.from_user.id == special_user_id:
++        await message.answer_sticker(sticker="CAACAgIAAxkBAAEOKcNn9BmjYCp6hmZJyG0xmnDQjoLaUgAC7RkAAk6H-Ei_b1reCn5mazYE")
++        await asyncio.sleep(2)
++        await message.answer_sticker(sticker="CAACAgIAAxkBAAEO2QhoF1jhqkGCR9iy1hkG46qyArOuwAACFQMAAuSkCAe7gnojkiZa8zYE")
++        await asyncio.sleep(2)
++        await message.answer_sticker(sticker="CAACAgIAAxkBAAEO2RZoF1nI31soK1SwQppJxaU9P0yFiwACHAADw1YDHgaZGGIHt0S3NgQ")
++
+ 
+ 
+ @base_router.message(Command("cancel"))
+@@ -95,12 +104,12 @@
+ async def help_information(message: Message):
+     text = ("Ещё раз привет! Это памятка расскажет тебе об основных функциях платформы:\n\n"
+             "1. Пройди авторизацию(/authorization) и создай личный профиль(/personal).\n\n"
+-            "2. /pupils - поиск ученика по классам, а также лента из учеников нашей Гимназии. \n\n"
++            "2. /pupils - поиск ученика по классам, а также лента из учеников школы. \n\n"
+             "3. /posts - создание постов, об этом подробнее:\n"
+-            "Всё завязано на виртуальной валюте нашей Гимназии Gymcoins💎, суть вот в чём:\n"
++            "Всё завязано на школьной виртуальной валюте Gymcoins💎, суть вот в чём:\n"
+             "Вы тапаете 💎 -> тратите на создание постов.\n"
+             "За лайки автор поcта получает специальную валюту 💡, баланс которой пользователь может посмотреть в 'Кошельке автора'.\n"
+-            "Её он может либо конвертировать в 💎, либо потратить на создания спец постов(гс или кружочки) или на покупку опций.\n")
++            "Её он может либо конвертировать в 💎, либо потратить на создания спец постов(гс/кружочки/видео) или на покупку опций.\n")
+ 
+     await message.answer(text=text)
+ 
+Index: handlers/admin.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Router\r\nfrom aiogram.types import CallbackQuery\r\nfrom .api.admin_api import AdminApi\r\nfrom .bot_config import bot\r\nfrom .settings import CheckAuthFilter\r\n\r\nadmin_router = Router()\r\n\r\n\r\n@admin_router.callback_query(CheckAuthFilter(), lambda cal: cal.data.startswith(\"admin:delete\"))\r\nasync def delete_bad_post(callback: CallbackQuery, token: str, is_admin: bool):\r\n    admin_id = callback.from_user.id\r\n    post_id, creator_id = callback.data.split(\":\")[2:4]\r\n\r\n    if not is_admin:\r\n        await callback.message.answer(\"Вы не админ!\")\r\n        return\r\n\r\n    admin_api = AdminApi(admin_id, token)\r\n\r\n    delete_result = await admin_api.delete_post(post_id)\r\n\r\n    if delete_result:\r\n        await callback.message.answer(\"Пост удалён✅\")\r\n        warning_text = (\"Предупреждение❗❗❗ \\n\\n\"\r\n                        \"Контент одного из Ваших постов оказался неприемлимым и соответсвенно был удалён модерацией.\\n\\n\"\r\n                        \"Уважайте других и не публикуйте всякую ерунду❗\")\r\n\r\n        await bot.send_message(creator_id, text=warning_text)\r\n
+===================================================================
+diff --git a/handlers/admin.py b/handlers/admin.py
+--- a/handlers/admin.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/admin.py	(date 1748335059978)
+@@ -1,29 +1,114 @@
+ from aiogram import Router
+-from aiogram.types import CallbackQuery
++from aiogram.types import CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, Message
++from aiogram.filters import StateFilter
++from aiogram.fsm.context import FSMContext
++from aiogram.fsm.state import State, StatesGroup
+ from .api.admin_api import AdminApi
+ from .bot_config import bot
+-from .settings import CheckAuthFilter
++from .settings import CheckAuthFilter, is_user_banned
++from .interface import user_card_action_kb
+ 
+ admin_router = Router()
+ 
+ 
+-@admin_router.callback_query(CheckAuthFilter(), lambda cal: cal.data.startswith("admin:delete"))
+-async def delete_bad_post(callback: CallbackQuery, token: str, is_admin: bool):
++@admin_router.callback_query(lambda cal: cal.data.startswith("admin:delete_post"), CheckAuthFilter())
++async def delete_bad_post(callback: CallbackQuery, token: str):
+     admin_id = callback.from_user.id
+     post_id, creator_id = callback.data.split(":")[2:4]
+-
+-    if not is_admin:
+-        await callback.message.answer("Вы не админ!")
+-        return
+-
+     admin_api = AdminApi(admin_id, token)
+ 
+     delete_result = await admin_api.delete_post(post_id)
+ 
+     if delete_result:
++        await callback.message.delete()
+         await callback.message.answer("Пост удалён✅")
+         warning_text = ("Предупреждение❗❗❗ \n\n"
+                         "Контент одного из Ваших постов оказался неприемлимым и соответсвенно был удалён модерацией.\n\n"
+                         "Уважайте других и не публикуйте всякую ерунду❗")
+ 
+         await bot.send_message(creator_id, text=warning_text)
++
++
++@admin_router.callback_query(lambda cal: cal.data.startswith("promotion"), CheckAuthFilter())
++async def promote_user_up_down(callback: CallbackQuery, token: str, is_admin: bool):
++    to_promote_id, action = callback.data.split(":")[1:]
++    admin_id = callback.from_user.id
++    admin_api = AdminApi(tg_id=admin_id, token=token)
++
++    if action == "upgrade":
++        result = await admin_api.promote_user(int(to_promote_id))
++        text = "Пользователь добавлен в число админов✅"
++        new_kb = user_card_action_kb(int(to_promote_id), is_admin, True)
++
++    else:
++        result = await admin_api.downgrade_user(int(to_promote_id))
++        text = "Пользователь исключён из числа админов❌"
++        new_kb = user_card_action_kb(int(to_promote_id), is_admin, False)
++
++    if result:
++        await callback.message.answer(text=text)
++        await callback.message.edit_reply_markup(reply_markup=new_kb)
++
++
++
++class BanStates(StatesGroup):
++    duration = State()
++    message = State()
++
++
++@admin_router.callback_query(lambda cal: cal.data.startswith("admin:ban_user"), CheckAuthFilter())
++async def start_baning_process(callback: CallbackQuery, state: FSMContext):
++    delete_id = int(callback.data.split(":")[2])
++
++    if await is_user_banned(delete_id):
++        await callback.message.answer(text="Пользователь уже заблокирован!")
++        return
++
++    await state.update_data(delete_id=delete_id)
++
++    await callback.message.answer("Введи сообщение пользователю:")
++    await state.set_state(BanStates.message)
++
++
++@admin_router.message(StateFilter(BanStates.message))
++async def get_ban_message(message: Message, state: FSMContext):
++    if not message.text:
++        await message.answer(text="Введи текст!")
++        return
++
++    ban_message = message.text
++    await state.update_data(message=ban_message)
++
++    btn = [[KeyboardButton(text="Навсегда😈")]]
++    keyboard = ReplyKeyboardMarkup(keyboard=btn, resize_keyboard=True)
++
++    await message.answer(text="Введи длительность бана(в часах):", reply_markup=keyboard)
++    await state.set_state(BanStates.duration)
++
++
++@admin_router.message(StateFilter(BanStates.duration), CheckAuthFilter())
++async def ban_user(message: Message, state: FSMContext, token: str):
++    if not message.text.isdigit() and message.text != "Навсегда😈":
++        await message.answer("Ошибка! Неверный формат!")
++        return
++
++    delete_id = await state.get_value("delete_id")
++    ban_message = await state.get_value("message")
++
++    duration = int(message.text) if message.text.isdigit() else -1 # -1 -> пользователь заблокирован навсегда
++
++    admin_id = message.from_user.id
++    admin_api = AdminApi(tg_id=admin_id, token=token)
++
++    result = await admin_api.ban_user(delete_id, duration)
++
++    if result:
++        ban_duration = f"{duration} час(а/ов)" if duration != -1 else "навсегда"
++        text = (f"Внимание❗ Вы были заблокированы модерацией и теперь {ban_duration} не сможете пользоваться ботом\n\n"
++                f"Cообщение от модерации:\n"
++                f"{ban_message}")
++
++        await bot.send_message(delete_id, text=text)
++        await message.answer("Пользователь забанен🚫", reply_markup=ReplyKeyboardRemove())
++
++    await state.clear()
+\ No newline at end of file
+Index: handlers/api/posts_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import aiohttp\r\nfrom redis import asyncio as aioredis\r\nimport ujson\r\nfrom dataclasses import dataclass\r\nimport json\r\nfrom decouple import config\r\nfrom .base_api import BaseApi\r\n\r\n\r\n@dataclass\r\nclass PaymentResult:\r\n    success: bool\r\n    amount: int\r\n\r\nclass PostsApi(BaseApi):\r\n    def __init__(self, tg_id, token=None):\r\n        super().__init__(tg_id)\r\n        self.token = token\r\n\r\n    async def create_post_db(self, text, content, describe, type):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            data = {\"text\": text, \"content\": content, \"describe\": describe, \"type\": type}\r\n\r\n            async with session.post(f\"{self.app_url}/create_post\", headers=headers, json=data) as resp:\r\n                if resp.status == 200:\r\n                    await redis.incrby(f\"{self.tg_id}:posts_today\", 1) # увеличиваем счётчик созданных постов на сегодня\r\n                    await redis.aclose()\r\n                    print(\"Создание поста\")\r\n                    return True\r\n\r\n                return False\r\n\r\n\r\n    async def pay_for_post(self, advance=None):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                            max_connections=10)\r\n\r\n        if advance is True: # покупается пост особенной категории\r\n            cost = int(config(\"ADVANCE_CREATE\"))\r\n            profit = await redis.get(f\"{self.tg_id}:profit\")\r\n            profit = int(profit.decode())\r\n\r\n            if cost > profit:\r\n                return PaymentResult(success=False, amount=cost - profit)\r\n\r\n            async with redis.pipeline() as pipe:\r\n                pipe.multi()\r\n                pipe.incrby(\"bank:balance\", cost) # увеличиваем баланс банка\r\n                pipe.decrby(f\"{self.tg_id}:profit\", cost) # уменьшаем баланс пользователя\r\n                await pipe.execute()\r\n\r\n            return PaymentResult(success=True, amount=cost)\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n\r\n            async with session.post(f\"{self.app_url}/post/pay\", headers=headers) as resp:\r\n                data = await resp.json()\r\n                if resp.status == 200:\r\n                    amount = data[\"paid\"]\r\n\r\n                    await redis.incrby(\"bank:balance\", amount)\r\n                    await redis.aclose()\r\n\r\n                    return PaymentResult(success=True, amount=amount)\r\n\r\n                if resp.status == 400:\r\n                    return PaymentResult(success=False, amount=data[\"amount\"])\r\n\r\n    async def load_post_stat(self):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            async with session.get(f\"{self.app_url}/post/stat\", headers=headers) as resp: # подгружаем посты юзера из бд\r\n                if resp.status == 200:\r\n                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                                    max_connections=10)\r\n                    data = await resp.json()\r\n                    data_json_string = json.dumps(data)\r\n\r\n                    await redis.set(f\"{self.tg_id}:posts:stat\", data_json_string) # сохраняем в redis\r\n\r\n                    return data\r\n\r\n                return False\r\n\r\n    async def get_post_stat(self, offset):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                        max_connections=10)\r\n\r\n        data = await redis.get(f\"{self.tg_id}:posts:stat\")\r\n        data = json.loads(data)\r\n\r\n        return data[\"posts\"][offset]\r\n\r\n\r\n    async def allow_post(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        extra_post_count = await redis.get(f\"{self.tg_id}:extra\")\r\n        allow_count = int(config(\"POSTS_PER_DAY\"))\r\n\r\n        if extra_post_count:\r\n            allow_count += int(extra_post_count)\r\n\r\n        count = await redis.get(f\"{self.tg_id}:posts_today\") # сколько уже постов пользователь создал сегодня\r\n\r\n        if not count:\r\n            await redis.setex(f\"{self.tg_id}:posts_today\", 24 * 60 * 60, \"0\")  # инициализируем счётчик постов на 24 часа\r\n            await redis.aclose()\r\n            return True\r\n\r\n        if int(count) < allow_count:\r\n            return True\r\n\r\n        return False\r\n\r\n\r\n    async def get_pupil_liked_post(self, post_id):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        post_actions = await redis.lrange(f\"{post_id}:post:actions\", 0, -1)\r\n\r\n        likers = []\r\n\r\n        for action_data in post_actions:\r\n            user_id, action = action_data.decode().split(\":\")\r\n\r\n            if action == \"like\":\r\n                likers.append(int(user_id)) # список тех, кто лайкнул данный пост\r\n\r\n        # запрос в бд, чтобы узнать информацию о лайкнувших\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            data = {\"likers\": likers}\r\n\r\n            async with session.post(f\"{self.app_url}/likers/data\", headers=headers, json=data) as resp:\r\n                if resp.status == 200:\r\n                    pupils = await resp.json()\r\n                    return pupils[\"data\"]\r\n\r\n                return False\r\n\r\n    # пост можно лайкнуть только один раз, соответсвующая проверка\r\n    @staticmethod\r\n    async def check_action_allow(redis, post_id, tg_id):\r\n        tg_id = str(tg_id)\r\n        post_actions = await redis.lrange(f\"{post_id}:post:actions\", 0, -1)\r\n\r\n        for user in post_actions:\r\n            if user.decode().startswith(tg_id):\r\n                return False\r\n\r\n        return True\r\n\r\n    # реакция на пост\r\n    async def post_action(self, post_id, creator_id, action):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        if not await self.check_action_allow(redis, post_id, self.tg_id):\r\n            return False\r\n\r\n        if action == \"like\":\r\n            to_author = int(config(\"LIKE_COST\")) # сколько нужно выплатить автору\r\n\r\n        else:\r\n            to_author = 0\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n\r\n            async with session.post(f\"{self.app_url}/post/{action}/{post_id}\", headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    exist = await redis.exists(f\"{post_id}:post:actions\")\r\n                    await redis.rpush(f\"{post_id}:post:actions\", f\"{str(self.tg_id)}:{action}\") # добавляем юзера в список лайкнувших данный пост\r\n\r\n                    if not exist:\r\n                        await redis.expire(f\"{post_id}:post:actions\", 24 * 60 * 60)\r\n                        # так как пост будет удалён из бд через 24 часа, то нужно удалить и этот ключ\r\n\r\n                    # транзакция по выплате средств создателю поста за лайк\r\n                    async with redis.pipeline() as pipe:\r\n                        pipe.multi()\r\n                        pipe.incrby(f\"{creator_id}:profit\", to_author)\r\n                        pipe.decrby(\"bank:balance\", to_author)\r\n                        await pipe.execute()\r\n\r\n                    await redis.aclose()\r\n\r\n                    return True\r\n\r\n                return False\r\n\r\n    @staticmethod\r\n    async def load_new_posts(redis, token, tg_id, app_url, only_negative):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {token}\"}\r\n            params = {\"only_negative\": only_negative}\r\n\r\n            async with session.get(f\"{app_url}/post/feed\", params=params, headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    data = await resp.json() # получаем данные из бд\r\n\r\n                    for post in data:\r\n                        post = json.dumps(post)\r\n                        await redis.rpush(f\"{tg_id}:posts\", post) # сохраняем в redis очередь\r\n\r\n                    return True\r\n\r\n                return False\r\n\r\n    async def delete_posts_in_cash(self): # очищает redis очередь юзера от старых постов\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        await redis.delete(f\"{self.tg_id}:posts\")\r\n        await redis.aclose()\r\n\r\n    async def watch_post(self, only_negative=0):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        post_data = await redis.lpop(f\"{self.tg_id}:posts\")\r\n\r\n        if not post_data:\r\n            # подгружаем новые посты, если они закончились в локальной очереди redis\r\n            load_posts = await self.load_new_posts(redis, self.token, self.tg_id, self.app_url, only_negative)\r\n\r\n            if not load_posts:\r\n                return False\r\n\r\n            post_data = await redis.lpop(f\"{self.tg_id}:posts\") # извлекаем пост из очереди\r\n\r\n        post = json.loads(post_data)\r\n        return post\r\n\r\n    # удаление поста\r\n    async def delete_post(self, post_id: int):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            params = {\"post_id\": post_id}\r\n\r\n            async with session.delete(f\"{self.app_url}/post/delete\", headers=headers, params=params) as resp:\r\n                if resp.status == 200:\r\n                    redis = await aioredis.from_url(self.redis_url, password=self.redis_password,\r\n                                                    max_connections=10)\r\n                    await redis.delete(f\"{post_id}:post:actions\") # вслед за постом удаляем и очередь с реакциями\r\n                    await redis.aclose()\r\n\r\n                    print(\"Пост удалён\")\r\n                    return True
+===================================================================
+diff --git a/handlers/api/posts_api.py b/handlers/api/posts_api.py
+--- a/handlers/api/posts_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/posts_api.py	(date 1748335059995)
+@@ -24,9 +24,9 @@
+             headers = {"Authorization": f"Bearer {self.token}"}
+             data = {"text": text, "content": content, "describe": describe, "type": type}
+ 
+-            async with session.post(f"{self.app_url}/create_post", headers=headers, json=data) as resp:
++            async with session.post(f"{self.app_url}/post/create", headers=headers, json=data) as resp:
+                 if resp.status == 200:
+-                    await redis.incrby(f"{self.tg_id}:posts_today", 1) # увеличиваем счётчик созданных постов на сегодня
++                    await redis.incrby(f"user:{self.tg_id}:posts_today", 1) # увеличиваем счётчик созданных постов на сегодня
+                     await redis.aclose()
+                     print("Создание поста")
+                     return True
+@@ -40,7 +40,7 @@
+ 
+         if advance is True: # покупается пост особенной категории
+             cost = int(config("ADVANCE_CREATE"))
+-            profit = await redis.get(f"{self.tg_id}:profit")
++            profit = await redis.get(f"user:{self.tg_id}:profit")
+             profit = int(profit.decode())
+ 
+             if cost > profit:
+@@ -49,7 +49,7 @@
+             async with redis.pipeline() as pipe:
+                 pipe.multi()
+                 pipe.incrby("bank:balance", cost) # увеличиваем баланс банка
+-                pipe.decrby(f"{self.tg_id}:profit", cost) # уменьшаем баланс пользователя
++                pipe.decrby(f"user:{self.tg_id}:profit", cost) # уменьшаем баланс пользователя
+                 await pipe.execute()
+ 
+             return PaymentResult(success=True, amount=cost)
+@@ -81,7 +81,7 @@
+                     data = await resp.json()
+                     data_json_string = json.dumps(data)
+ 
+-                    await redis.set(f"{self.tg_id}:posts:stat", data_json_string) # сохраняем в redis
++                    await redis.set(f"user:{self.tg_id}:posts:stat", data_json_string) # сохраняем в redis
+ 
+                     return data
+ 
+@@ -91,7 +91,7 @@
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
+                                         max_connections=10)
+ 
+-        data = await redis.get(f"{self.tg_id}:posts:stat")
++        data = await redis.get(f"user:{self.tg_id}:posts:stat")
+         data = json.loads(data)
+ 
+         return data["posts"][offset]
+@@ -100,16 +100,16 @@
+     async def allow_post(self):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        extra_post_count = await redis.get(f"{self.tg_id}:extra")
++        extra_post_count = await redis.get(f"user:{self.tg_id}:extra")
+         allow_count = int(config("POSTS_PER_DAY"))
+ 
+         if extra_post_count:
+             allow_count += int(extra_post_count)
+ 
+-        count = await redis.get(f"{self.tg_id}:posts_today") # сколько уже постов пользователь создал сегодня
++        count = await redis.get(f"user:{self.tg_id}:posts_today") # сколько уже постов пользователь создал сегодня
+ 
+         if not count:
+-            await redis.setex(f"{self.tg_id}:posts_today", 24 * 60 * 60, "0")  # инициализируем счётчик постов на 24 часа
++            await redis.setex(f"user:{self.tg_id}:posts_today", 24 * 60 * 60, "0")  # инициализируем счётчик постов на 24 часа
+             await redis.aclose()
+             return True
+ 
+@@ -137,7 +137,7 @@
+             headers = {"Authorization": f"Bearer {self.token}"}
+             data = {"likers": likers}
+ 
+-            async with session.post(f"{self.app_url}/likers/data", headers=headers, json=data) as resp:
++            async with session.post(f"{self.app_url}/post/likers/data", headers=headers, json=data) as resp:
+                 if resp.status == 200:
+                     pupils = await resp.json()
+                     return pupils["data"]
+@@ -157,7 +157,7 @@
+         return True
+ 
+     # реакция на пост
+-    async def post_action(self, post_id, creator_id, action):
++    async def post_action(self, post_id: int, creator_id, action):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+         if not await self.check_action_allow(redis, post_id, self.tg_id):
+@@ -175,7 +175,7 @@
+             async with session.post(f"{self.app_url}/post/{action}/{post_id}", headers=headers) as resp:
+                 if resp.status == 200:
+                     exist = await redis.exists(f"{post_id}:post:actions")
+-                    await redis.rpush(f"{post_id}:post:actions", f"{str(self.tg_id)}:{action}") # добавляем юзера в список лайкнувших данный пост
++                    await redis.rpush(f"{post_id}:post:actions", f"{str(self.tg_id)}:{action}") # добавляем юзера в список просмотревших данный пост
+ 
+                     if not exist:
+                         await redis.expire(f"{post_id}:post:actions", 24 * 60 * 60)
+@@ -184,7 +184,7 @@
+                     # транзакция по выплате средств создателю поста за лайк
+                     async with redis.pipeline() as pipe:
+                         pipe.multi()
+-                        pipe.incrby(f"{creator_id}:profit", to_author)
++                        pipe.incrby(f"user:{creator_id}:profit", to_author)
+                         pipe.decrby("bank:balance", to_author)
+                         await pipe.execute()
+ 
+@@ -206,22 +206,22 @@
+ 
+                     for post in data:
+                         post = json.dumps(post)
+-                        await redis.rpush(f"{tg_id}:posts", post) # сохраняем в redis очередь
++                        await redis.rpush(f"user:{tg_id}:posts", post) # сохраняем в redis очередь
+ 
+                     return True
+ 
+                 return False
+ 
+-    async def delete_posts_in_cash(self): # очищает redis очередь юзера от старых постов
++    async def delete_posts_in_cache(self): # очищает redis очередь юзера от старых постов
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        await redis.delete(f"{self.tg_id}:posts")
++        await redis.delete(f"user:{self.tg_id}:posts")
+         await redis.aclose()
+ 
+     async def watch_post(self, only_negative=0):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        post_data = await redis.lpop(f"{self.tg_id}:posts")
++        post_data = await redis.lpop(f"user:{self.tg_id}:posts")
+ 
+         if not post_data:
+             # подгружаем новые посты, если они закончились в локальной очереди redis
+@@ -230,7 +230,7 @@
+             if not load_posts:
+                 return False
+ 
+-            post_data = await redis.lpop(f"{self.tg_id}:posts") # извлекаем пост из очереди
++            post_data = await redis.lpop(f"user:{self.tg_id}:posts") # извлекаем пост из очереди
+ 
+         post = json.loads(post_data)
+         return post
+@@ -245,7 +245,9 @@
+                 if resp.status == 200:
+                     redis = await aioredis.from_url(self.redis_url, password=self.redis_password,
+                                                     max_connections=10)
+-                    await redis.delete(f"{post_id}:post:actions") # вслед за постом удаляем и очередь с реакциями
++
++                    # удаляем ключ с реакциями под постом
++                    await redis.delete(f"{post_id}:post:actions")
+                     await redis.aclose()
+ 
+                     print("Пост удалён")
+Index: handlers/api/gymcoins_api.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import aiohttp\r\nfrom redis import asyncio as aioredis\r\nimport ujson\r\nfrom .base_api import BaseApi\r\n\r\n\r\nclass GymcoinsApi(BaseApi):\r\n    def __init__(self, tg_id, token=None):\r\n        super().__init__(tg_id)\r\n        self.token = token\r\n\r\n    async def get_balance(self):\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            async with session.get(f\"{self.app_url}/user/balance\", headers=headers) as resp:\r\n                if resp.status == 200:\r\n                    data = await resp.json()\r\n                    return data[\"balance\"]\r\n\r\n                return False\r\n\r\n    async def get_profit(self):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n\r\n        profit = await redis.get(f\"{self.tg_id}:profit\")\r\n        profit = int(profit)\r\n\r\n        return profit\r\n\r\n    async def withdraw_funds(self, amount, source):\r\n        redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)\r\n        profit = int(await redis.get(f\"{self.tg_id}:profit\"))\r\n\r\n        if amount > profit:\r\n            return False\r\n\r\n        async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:\r\n            headers = {\"Authorization\": f\"Bearer {self.token}\"}\r\n            params = {\"funds_amount\": amount}\r\n\r\n            async with session.post(f\"{self.app_url}/gymcoins/withdraw\", headers=headers, params=params) as resp:\r\n                if resp.status == 200:\r\n                    if source == \"profit\":\r\n                        await redis.decrby(f\"{self.tg_id}:profit\", amount)\r\n\r\n                    else:\r\n                        await redis.decrby(\"bank:balance\", amount)\r\n\r\n                    await redis.aclose()\r\n\r\n                    return True\r\n\r\n                return False
+===================================================================
+diff --git a/handlers/api/gymcoins_api.py b/handlers/api/gymcoins_api.py
+--- a/handlers/api/gymcoins_api.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/api/gymcoins_api.py	(date 1748335059998)
+@@ -22,14 +22,14 @@
+     async def get_profit(self):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+ 
+-        profit = await redis.get(f"{self.tg_id}:profit")
++        profit = await redis.get(f"user:{self.tg_id}:profit")
+         profit = int(profit)
+ 
+         return profit
+ 
+     async def withdraw_funds(self, amount, source):
+         redis = await aioredis.from_url(self.redis_url, password=self.redis_password, max_connections=10)
+-        profit = int(await redis.get(f"{self.tg_id}:profit"))
++        profit = int(await redis.get(f"user:{self.tg_id}:profit"))
+ 
+         if amount > profit:
+             return False
+@@ -41,7 +41,7 @@
+             async with session.post(f"{self.app_url}/gymcoins/withdraw", headers=headers, params=params) as resp:
+                 if resp.status == 200:
+                     if source == "profit":
+-                        await redis.decrby(f"{self.tg_id}:profit", amount)
++                        await redis.decrby(f"user:{self.tg_id}:profit", amount)
+ 
+                     else:
+                         await redis.decrby("bank:balance", amount)
+Index: handlers/bot_config.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Bot, Dispatcher\r\nfrom aiogram.fsm.storage.memory import MemoryStorage\r\nfrom decouple import config\r\n\r\n\r\nbot = Bot(token=config('TOKEN'))\r\ndp = Dispatcher(storage=MemoryStorage())
+===================================================================
+diff --git a/handlers/bot_config.py b/handlers/bot_config.py
+--- a/handlers/bot_config.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/bot_config.py	(date 1748335060002)
+@@ -4,4 +4,5 @@
+ 
+ 
+ bot = Bot(token=config('TOKEN'))
+-dp = Dispatcher(storage=MemoryStorage())
+\ No newline at end of file
++dp = Dispatcher(storage=MemoryStorage())
++
+Index: handlers/user_search.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Router\r\nfrom aiogram.types import Message, CallbackQuery, InputMediaPhoto\r\nfrom aiogram.filters import StateFilter\r\nfrom aiogram.fsm.context import FSMContext\r\nfrom aiogram.fsm.state import State, StatesGroup\r\nfrom aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton\r\nfrom .api.users_feed_api import UserFeedApi\r\nfrom .api.auth_api import AuthApi\r\nfrom .api.profile_api import UserProfileApi\r\nfrom .interface import get_pagination_keyboard, get_sex_keyboard, get_form_keyboard, get_feed_keyboard, get_request_keyboard\r\nfrom .settings import all_forms, CheckAuthFilter\r\nfrom handlers.bot_config import bot\r\nimport asyncio\r\n\r\nsearch_router = Router()\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:search\")\r\nasync def search_user(callback: CallbackQuery, token: str):\r\n    user_id = callback.from_user.id\r\n    feed_api = UserFeedApi(user_id, token)\r\n\r\n    data = await feed_api.get_users_from_form(\"6А\")\r\n\r\n\r\n    keyboard = get_pagination_keyboard(data, 0)\r\n    await callback.message.answer(text=\"Список учеников данного класса:\", reply_markup=keyboard)\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda call: call.data.startswith(\"form\"))\r\nasync def move_to_other_form(callback: CallbackQuery, token: str):\r\n    user_id = callback.from_user.id\r\n    feed_api = UserFeedApi(user_id, token)\r\n\r\n    key_offset = int(callback.data.split(\":\")[1])\r\n    form = all_forms[key_offset]\r\n    data = await feed_api.get_users_from_form(form)\r\n\r\n    keyboard = get_pagination_keyboard(data, key_offset)\r\n\r\n    await callback.message.edit_text(text=\"Список учеников данного класса:\", reply_markup=keyboard)\r\n    await callback.answer()\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda call: call.data.startswith(\"pupil\"))\r\nasync def get_pupil_profile(callback: CallbackQuery, token: str):\r\n    user_id = callback.from_user.id\r\n    cal_data = callback.data.split(\":\")\r\n\r\n    form = cal_data[1]\r\n    tg_id = cal_data[2]\r\n\r\n    feed_api = UserFeedApi(user_id, token)\r\n\r\n    data = await feed_api.get_users_from_form(form)\r\n\r\n    pupil = data[tg_id]\r\n    profile_text = (f\"{pupil[\"first_name\"]} {pupil[\"last_name\"]} {form}\\n\\n\"\r\n                    f\"{pupil[\"info\"]}\\n\\n\"\r\n                    f\"{pupil[\"karma\"]} ❤\")\r\n\r\n    profile_photo = pupil[\"photo\"]\r\n\r\n    buttons = [[InlineKeyboardButton(text=\"Обменяться контактами\", callback_data=f\"exchange:{tg_id}:search\")],\r\n              [InlineKeyboardButton(text=\"Скрыть\", callback_data=\"hide_profile\")]]\r\n    kb = InlineKeyboardMarkup(inline_keyboard=buttons)\r\n\r\n    await callback.message.answer(text=\"Вот профиль данного пользователя:\")\r\n    await callback.message.answer_photo(photo=profile_photo, caption=profile_text, reply_markup=kb)\r\n\r\n\r\n@search_router.callback_query(lambda cal: cal.data == \"hide_profile\")\r\nasync def hide_profile(callback: CallbackQuery):\r\n    await callback.message.delete()\r\n\r\nclass FeedStates(StatesGroup):\r\n    start = State()\r\n    sex = State()\r\n    form = State()\r\n    watching = State()\r\n    exchange = State()\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:users_feed\")\r\nasync def welcome_feed(callback: CallbackQuery, state: FSMContext):\r\n    keyboard = [\r\n        [InlineKeyboardButton(text=\"Поехали!\", callback_data=\"Поехали!\")]\r\n    ]\r\n    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard)\r\n\r\n    await callback.message.answer(\"Это лента учеников нашей гимназии!\\n Укажите параметры ленты перед тем как начать)\", reply_markup=keyboard)\r\n    await state.set_state(FeedStates.start)\r\n\r\n\r\n@search_router.callback_query(lambda cal: cal.data == \"Поехали!\", StateFilter(FeedStates.start))\r\nasync def get_sex(callback: CallbackQuery, state: FSMContext):\r\n    keyboard = get_sex_keyboard()\r\n    await callback.message.answer(text=\"Ученики какого пола тебя интересуют?\", reply_markup=keyboard)\r\n    await state.set_state(FeedStates.sex)\r\n\r\n@search_router.callback_query(lambda cal: cal.data in (\"0\", \"1\", \"2\"), StateFilter(FeedStates.sex))\r\nasync def get_form_more_than(callback: CallbackQuery, state: FSMContext):\r\n    await state.update_data(sex=int(callback.data))\r\n\r\n    keyboard = get_form_keyboard()\r\n    await callback.message.answer(text=\"Выбери параллель(ученики из параллели ниже выбранной тебе попадаться не будут)\", reply_markup=keyboard)\r\n    await state.set_state(FeedStates.form)\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data in (\"6\", \"7\", \"8\", \"9\", \"10\", \"11\"), StateFilter(FeedStates.form))\r\nasync def start_watching(callback: CallbackQuery, state: FSMContext, token: str):\r\n    user_id = callback.from_user.id\r\n    await state.update_data(form_min=int(callback.data))\r\n\r\n    await callback.message.answer(text=\"Параметры сохранены. Начинаем!\")\r\n\r\n    data = await state.get_data()\r\n    feed_api = UserFeedApi(user_id, token)\r\n\r\n    pupil = await feed_api.get_user_from_feed(sex=data[\"sex\"], form_min=data[\"form_min\"], start=True)\r\n\r\n    if not pupil:\r\n        await callback.message.answer(text=\"К сожалению, не нашлось пользователей, удовлетворяющих данному фильтру(\")\r\n        await state.clear()\r\n        return\r\n\r\n    profile_text = (f\"{pupil[\"first_name\"]} {pupil[\"last_name\"]} {pupil[\"form\"]}\\n\\n\"\r\n                    f\"{pupil[\"info\"]}\\n\\n\"\r\n                    )\r\n\r\n    profile_photo = pupil[\"photo\"]\r\n    keyboard = get_feed_keyboard(tg_id=pupil[\"tg_id\"], karma=pupil[\"karma\"])\r\n\r\n    await callback.message.answer_photo(photo=profile_photo, caption=profile_text, reply_markup=keyboard)\r\n    await state.set_state(FeedStates.watching)\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data in (\"Далее\", \"Продолжить\"), StateFilter(FeedStates.watching))\r\nasync def show_user_feed(callback: CallbackQuery, state: FSMContext, token: str):\r\n    user_id = callback.from_user.id\r\n    data = await state.get_data()\r\n    feed_api = UserFeedApi(user_id, token)\r\n\r\n    pupil = await feed_api.get_user_from_feed(sex=data[\"sex\"], form_min=data[\"form_min\"])\r\n\r\n    profile_text = (f\"{pupil[\"first_name\"]} {pupil[\"last_name\"]} {pupil[\"form\"]}\\n\\n\"\r\n                    f\"{pupil[\"info\"]}\\n\\n\"\r\n                    )\r\n\r\n    photo_id = pupil[\"photo\"]\r\n    keyboard = get_feed_keyboard(tg_id=pupil[\"tg_id\"], karma=pupil[\"karma\"])\r\n\r\n    if callback.data == \"Далее\":\r\n        profile_photo = InputMediaPhoto(media=photo_id, caption=profile_text)\r\n        await callback.message.edit_media(media=profile_photo, reply_markup=keyboard)\r\n\r\n    else:\r\n        await callback.message.answer_photo(photo=photo_id, caption=profile_text, reply_markup=keyboard)\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data.startswith(\"karma\"), StateFilter(FeedStates.watching))\r\nasync def increase_karma(callback: CallbackQuery, token: str):\r\n    user_id = callback.from_user.id\r\n    call_data = callback.data.split(\":\")\r\n    tg_id, karma = int(call_data[1]), int(call_data[2])\r\n\r\n    feed_api = UserFeedApi(user_id, token)\r\n\r\n    result = await feed_api.like_user(who_id=tg_id)\r\n\r\n    if result:\r\n        await callback.message.edit_caption(caption=callback.message.caption, reply_markup=get_feed_keyboard(tg_id, karma+1))\r\n        await callback.answer()\r\n\r\n    else:\r\n        msg = await callback.message.answer(text=\"К сожалению Вы не можете так часто лайкать одного и того же пользователя(\")\r\n        await asyncio.sleep(3)\r\n        await msg.delete()\r\n\r\n\r\n@search_router.callback_query(lambda cal: cal.data.startswith(\"exchange\"))\r\nasync def exchange_text_suggestion(callback: CallbackQuery, state: FSMContext):\r\n    call_data = callback.data.split(\":\")\r\n    receiver_id = int(call_data[1])\r\n    from_state = call_data[2]\r\n\r\n    user_id = callback.from_user.id\r\n    feed_api = UserFeedApi(user_id)\r\n\r\n    recently_sent = await feed_api.check_request_history(receiver_id=receiver_id)\r\n\r\n    if recently_sent:\r\n        msg = await callback.message.answer(\"Вы не можете так часто отправлять запрос в друзья(\")\r\n        await asyncio.sleep(3)\r\n        await msg.delete()\r\n        return\r\n\r\n    await state.update_data(receiver_id=receiver_id, from_state=from_state)\r\n    await callback.message.answer(text=\"Введи сообщение, которое увидит пользователь при просмотре твоей заявки:\")\r\n\r\n    await state.set_state(FeedStates.exchange)\r\n\r\n\r\n@search_router.message(StateFilter(FeedStates.exchange))\r\nasync def send_exchange_message(message: Message, state: FSMContext):\r\n    if not message.text:\r\n        await message.answer(\"Отправить можно только текст!\")\r\n        return\r\n\r\n    data = await state.get_data()\r\n\r\n    receiver_id = data[\"receiver_id\"]\r\n    from_state = data[\"from_state\"]\r\n\r\n    my_id = message.from_user.id\r\n    my_username = message.from_user.username\r\n    feed_api = UserFeedApi(my_id)\r\n\r\n    await bot.send_message(chat_id=receiver_id, text=\"К тебе поступила заявка на обмен контактами, скорей узнай кто это\")\r\n    await feed_api.send_exchange_request(receiver_id=receiver_id, sender_username=my_username, message=message.text)\r\n\r\n\r\n    if from_state == \"feed\":\r\n        button = [[InlineKeyboardButton(text=\"Продолжить просмотр?\", callback_data=\"Продолжить\")]]\r\n        keyboard = InlineKeyboardMarkup(inline_keyboard=button)\r\n        await message.answer(\"Заявка отправлена!\", reply_markup=keyboard)\r\n        await state.set_state(FeedStates.watching)\r\n\r\n    else:\r\n        await message.answer(\"Заявка отправлена!\")\r\n        await state.clear()\r\n\r\n\r\n@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:friend_requests\")\r\nasync def info_about_requests(callback: CallbackQuery, token: str):\r\n    user_id = callback.from_user.id\r\n\r\n    feed_api = UserFeedApi(user_id, token)\r\n    amount = await feed_api.get_amount_requests()\r\n\r\n    if amount == 0:\r\n        await callback.message.answer(\"Пока что нет новых заявок(\")\r\n        return\r\n\r\n    button = [[InlineKeyboardButton(text=\"Смотреть\", callback_data=\"next_request\")]]\r\n    keyboard = InlineKeyboardMarkup(inline_keyboard=button)\r\n\r\n    await callback.message.answer(f\"{amount} пользователей захотели обменяться с вами контактами\", reply_markup=keyboard)\r\n\r\n\r\n@search_router.callback_query(lambda cal: cal.data == \"next_request\")\r\nasync def get_request_info(callback: CallbackQuery):\r\n    user_id = callback.from_user.id\r\n    feed_api = UserFeedApi(user_id)\r\n\r\n    info = await feed_api.get_requests()\r\n\r\n    if not info:\r\n        await callback.message.answer(text=\"Заявок больше нет\")\r\n        await callback.message.delete()\r\n        return\r\n\r\n    sender_id = info[\"sender_id\"]\r\n    sender_username = info[\"sender_username\"]\r\n    message = info[\"message\"]\r\n\r\n    keyboard = get_request_keyboard(sender_id, sender_username)\r\n\r\n    auth_api = AuthApi(sender_id)\r\n    auth_result = await auth_api.login()\r\n    profile_api = UserProfileApi(sender_id, auth_result.token) # получаем данные о пользователе с помощью его access token\r\n\r\n    pupil = await profile_api.get_profile()\r\n\r\n    caption = f\"{pupil[\"first_name\"]} {pupil[\"last_name\"]} {pupil[\"form\"]} \\n\\n Сообщение Вам: \\n {message}\"\r\n    photo = pupil[\"photo\"]\r\n\r\n    if not callback.message.photo:\r\n        await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=keyboard)\r\n\r\n    else:\r\n        photo = InputMediaPhoto(media=photo, caption=caption)\r\n        await callback.message.edit_media(media=photo, reply_markup=keyboard)\r\n\r\n\r\n@search_router.callback_query(lambda cal: cal.data.startswith(\"agree\"))\r\nasync def agree_with_exchange(callback: CallbackQuery):\r\n    cal_data = callback.data.split(\":\")\r\n\r\n    pupil_id, pupil_username = int(cal_data[1]), cal_data[2]\r\n    my_username = callback.from_user.username\r\n\r\n    button = [[InlineKeyboardButton(text=\"Продолжить\", callback_data=\"next_request\")]]\r\n    keyboard = InlineKeyboardMarkup(inline_keyboard=button)\r\n\r\n    await callback.message.answer(f\"Успешно! Начинайте общение прямо сейчас: @{pupil_username}\")\r\n    await callback.message.answer(text=\"Или продолжите просмотр заявок:\", reply_markup=keyboard)\r\n\r\n    await bot.send_message(chat_id=pupil_id, text=f\"Ваша заявка на обмен контактов была одобрена! @{my_username}\")\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n
+===================================================================
+diff --git a/handlers/user_search.py b/handlers/user_search.py
+--- a/handlers/user_search.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/user_search.py	(date 1748335060006)
+@@ -7,7 +7,9 @@
+ from .api.users_feed_api import UserFeedApi
+ from .api.auth_api import AuthApi
+ from .api.profile_api import UserProfileApi
+-from .interface import get_pagination_keyboard, get_sex_keyboard, get_form_keyboard, get_feed_keyboard, get_request_keyboard
++from .interface import (get_pagination_keyboard, get_sex_keyboard, get_form_keyboard,
++                        get_feed_keyboard, get_request_keyboard, user_card_action_kb)
++
+ from .settings import all_forms, CheckAuthFilter
+ from handlers.bot_config import bot
+ import asyncio
+@@ -15,7 +17,7 @@
+ search_router = Router()
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:search")
++@search_router.callback_query(lambda cal: cal.data == "commands:search", CheckAuthFilter())
+ async def search_user(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+     feed_api = UserFeedApi(user_id, token)
+@@ -27,7 +29,7 @@
+     await callback.message.answer(text="Список учеников данного класса:", reply_markup=keyboard)
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda call: call.data.startswith("form"))
++@search_router.callback_query(lambda call: call.data.startswith("form"), CheckAuthFilter())
+ async def move_to_other_form(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+     feed_api = UserFeedApi(user_id, token)
+@@ -42,8 +44,8 @@
+     await callback.answer()
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda call: call.data.startswith("pupil"))
+-async def get_pupil_profile(callback: CallbackQuery, token: str):
++@search_router.callback_query(lambda call: call.data.startswith("pupil"), CheckAuthFilter())
++async def get_pupil_profile(callback: CallbackQuery, token: str, is_admin: bool):
+     user_id = callback.from_user.id
+     cal_data = callback.data.split(":")
+ 
+@@ -61,9 +63,7 @@
+ 
+     profile_photo = pupil["photo"]
+ 
+-    buttons = [[InlineKeyboardButton(text="Обменяться контактами", callback_data=f"exchange:{tg_id}:search")],
+-              [InlineKeyboardButton(text="Скрыть", callback_data="hide_profile")]]
+-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
++    kb = user_card_action_kb(int(tg_id), is_admin, pupil["is_admin"])
+ 
+     await callback.message.answer(text="Вот профиль данного пользователя:")
+     await callback.message.answer_photo(photo=profile_photo, caption=profile_text, reply_markup=kb)
+@@ -80,7 +80,7 @@
+     watching = State()
+     exchange = State()
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:users_feed")
++@search_router.callback_query(lambda cal: cal.data == "commands:users_feed", CheckAuthFilter())
+ async def welcome_feed(callback: CallbackQuery, state: FSMContext):
+     keyboard = [
+         [InlineKeyboardButton(text="Поехали!", callback_data="Поехали!")]
+@@ -106,17 +106,15 @@
+     await state.set_state(FeedStates.form)
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data in ("6", "7", "8", "9", "10", "11"), StateFilter(FeedStates.form))
++@search_router.callback_query(lambda cal: cal.data in ("6", "7", "8", "9", "10", "11"), StateFilter(FeedStates.form), CheckAuthFilter())
+ async def start_watching(callback: CallbackQuery, state: FSMContext, token: str):
+     user_id = callback.from_user.id
+-    await state.update_data(form_min=int(callback.data))
++    form_min = int(callback.data)
++    await state.update_data(form_min=form_min)
++    sex = await state.get_value("sex")
+ 
+-    await callback.message.answer(text="Параметры сохранены. Начинаем!")
+-
+-    data = await state.get_data()
+     feed_api = UserFeedApi(user_id, token)
+-
+-    pupil = await feed_api.get_user_from_feed(sex=data["sex"], form_min=data["form_min"], start=True)
++    pupil = await feed_api.get_user_from_feed(sex=sex, form_min=form_min, start=True)
+ 
+     if not pupil:
+         await callback.message.answer(text="К сожалению, не нашлось пользователей, удовлетворяющих данному фильтру(")
+@@ -134,7 +132,7 @@
+     await state.set_state(FeedStates.watching)
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data in ("Далее", "Продолжить"), StateFilter(FeedStates.watching))
++@search_router.callback_query(lambda cal: cal.data in ("Далее", "Продолжить"), StateFilter(FeedStates.watching), CheckAuthFilter())
+ async def show_user_feed(callback: CallbackQuery, state: FSMContext, token: str):
+     user_id = callback.from_user.id
+     data = await state.get_data()
+@@ -157,7 +155,7 @@
+         await callback.message.answer_photo(photo=photo_id, caption=profile_text, reply_markup=keyboard)
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data.startswith("karma"), StateFilter(FeedStates.watching))
++@search_router.callback_query(lambda cal: cal.data.startswith("karma"), StateFilter(FeedStates.watching), CheckAuthFilter())
+ async def increase_karma(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+     call_data = callback.data.split(":")
+@@ -177,7 +175,7 @@
+         await msg.delete()
+ 
+ 
+-@search_router.callback_query(lambda cal: cal.data.startswith("exchange"))
++@search_router.callback_query(lambda cal: cal.data.startswith("exchange"), CheckAuthFilter())
+ async def exchange_text_suggestion(callback: CallbackQuery, state: FSMContext):
+     call_data = callback.data.split(":")
+     receiver_id = int(call_data[1])
+@@ -230,7 +228,7 @@
+         await state.clear()
+ 
+ 
+-@search_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:friend_requests")
++@search_router.callback_query(lambda cal: cal.data == "commands:friend_requests", CheckAuthFilter())
+ async def info_about_requests(callback: CallbackQuery, token: str):
+     user_id = callback.from_user.id
+ 
+Index: handlers/registration.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram import Router\r\nfrom aiogram.types import Message, CallbackQuery\r\nfrom aiogram.filters import Command, StateFilter\r\nfrom aiogram.fsm.context import FSMContext\r\nfrom aiogram.fsm.state import State, StatesGroup\r\nfrom aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo\r\nfrom decouple import config\r\nfrom .api.auth_api import AuthApi, ProfileStatus, CreateStatus\r\nfrom .api.profile_api import UserProfileApi, ProfileProgress\r\nfrom .interface import edit_profile_kb, get_grade_kb, get_letter_kb\r\nfrom .settings import CheckAuthFilter\r\n\r\nregistration_router = Router()\r\n\r\nclass Profile(StatesGroup):\r\n    grade = State()\r\n    letter = State()\r\n    photo = State()\r\n    info = State()\r\n\r\n\r\nclass IPhoneAuthStates(StatesGroup):\r\n    vk_id = State()\r\n\r\n\r\n@registration_router.message(Command(\"authorization\"))\r\nasync def start_authorization(message: Message):\r\n    buttons = [\r\n            [InlineKeyboardButton(text=\"IOS(IPhone)\", callback_data=\"system:iphone\")],\r\n            [InlineKeyboardButton(text=\"Android\", callback_data=\"system:android\")]\r\n        ]\r\n\r\n    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)\r\n\r\n    await message.answer(text=\"Выбери ОС твоего телефона:\", reply_markup=keyboard)\r\n\r\n@registration_router.callback_query(lambda cal: cal.data.startswith(\"system\"))\r\nasync def authorization(callback: CallbackQuery, state: FSMContext):\r\n    system = callback.data.split(\":\")[1]\r\n\r\n    if system == \"android\":\r\n        reg_but = InlineKeyboardButton(text=\"Авторизоваться\", web_app=WebAppInfo(url=f'{config(\"APP_URL\")}/welcome_authorization'))\r\n        keyboard = InlineKeyboardMarkup(inline_keyboard=[[reg_but]])\r\n\r\n        await callback.message.answer(\"Авторизуйся через ВК\", reply_markup=keyboard)\r\n\r\n    else:\r\n        await callback.message.answer(text=\"Отправь своё VK ID.\\n\"\r\n                                           \"Его ты можешь найти в настройкак своего VK профиля\\n\"\r\n                                           \"https://id.vk.com/account/#/main\\n\\n\"                                           \r\n                                           \"P.S: VK ID не являентся приватной информацией,\"\r\n                                           \" любой пользователь может узнать твой id даже через браузер\")\r\n\r\n        await state.set_state(IPhoneAuthStates.vk_id)\r\n\r\n\r\n@registration_router.message(StateFilter(IPhoneAuthStates.vk_id))\r\nasync def finish_auth_iphone(message: Message, state: FSMContext):\r\n    if not message.text.isdigit():\r\n        await message.answer(text=\"Некорректный формат id!\")\r\n        return\r\n\r\n    tg_name = message.from_user.username\r\n    tg_id = message.from_user.id\r\n    vk_id = int(message.text)\r\n\r\n    auth_api = AuthApi(tg_id=tg_id)\r\n\r\n    status_result = await auth_api.auth_iphone(tg_name=tg_name, vk_id=vk_id)\r\n\r\n    if status_result == 200:\r\n        await message.answer(\"Авторизация прошла успешно! Теперь создай свой профиль!(/personal))\")\r\n\r\n    elif status_result == 201:\r\n        await message.answer(\"Пользователь уже авторизован!\")\r\n\r\n    else:\r\n        await message.answer(\"Ошибка! Запустите процесс по новой!\")\r\n\r\n    await state.clear()\r\n\r\n\r\n@registration_router.callback_query(lambda cal: cal.data == \"commands:profile\")\r\nasync def registration(callback: CallbackQuery, state: FSMContext):\r\n    user_id = callback.from_user.id\r\n\r\n    auth_api = AuthApi(tg_id=user_id)\r\n    auth_result = await auth_api.login()\r\n\r\n    if auth_result.status == ProfileStatus.HAS_PROFILE:\r\n        token = auth_result.token\r\n        profile_api = UserProfileApi(tg_id=user_id, token=token)\r\n\r\n        profile = await profile_api.get_profile()\r\n\r\n        if not profile:\r\n            await callback.message.answer(\"Ошибка! Не могу загрузить профиль!\")\r\n            return\r\n\r\n        await callback.message.answer(\"Твой профиль выглядит следующим образом:\")\r\n        await callback.message.answer_photo(profile[\"photo\"],\r\n                                    caption=f\"{profile[\"first_name\"]} {profile[\"last_name\"]} {profile[\"form\"]} \\n\\n\"\r\n                                            f\"{profile[\"info\"]} \\n\\n\"\r\n                                            f\"{profile[\"karma\"]} ❤\")\r\n        return\r\n\r\n    progress = ProfileProgress(user_id)\r\n\r\n    saved_progress_data = await progress.get_profile_progress() # сохранённые данные профиля пользователя, которые нужно сохранить в бд после авторизации\r\n\r\n    if saved_progress_data:\r\n        result = await auth_api.create_profile(saved_progress_data)\r\n        print(result.status)\r\n\r\n        if result.status == CreateStatus.SUCCESS:\r\n            await callback.message.answer(\"Профиль успешно создан! Чтобы перейти в него, нажмите на кнопку 'Профиль' ещё раз.\")\r\n            return\r\n\r\n        if result.status == CreateStatus.NOT_AUTHENTICATED:\r\n            await callback.message.answer(\"Авторизуйтесь, чтобы завершить процесс создания профиля!(/authorization)\")\r\n            return\r\n\r\n    keyboard = get_grade_kb()\r\n    await callback.message.answer(\"Приступим к оформлению твоего профиля!\\n Выбери параллель, в которой ты учишься:\", reply_markup=keyboard)\r\n\r\n    await state.update_data(tg_id=callback.from_user.id)\r\n    await state.set_state(Profile.grade)\r\n\r\n\r\n@registration_router.callback_query(StateFilter(Profile.grade), lambda cal: cal.data.startswith(\"grade\"))\r\nasync def get_user_grade(callback: CallbackQuery, state: FSMContext):\r\n    grade = callback.data.split(\":\")[1]\r\n\r\n    kb = get_letter_kb(grade)\r\n\r\n    await callback.message.answer(text=\"Выбери букву твоего класса:\", reply_markup=kb)\r\n    await state.set_state(Profile.letter)\r\n\r\n\r\n@registration_router.callback_query(StateFilter(Profile.letter), lambda cal: cal.data.startswith(\"grade_letter\"))\r\nasync def get_user_letter(callback: CallbackQuery, state: FSMContext):\r\n    form = callback.data.split(\":\")[1]\r\n\r\n    await state.update_data(form=form)\r\n\r\n    await callback.message.answer(text=\"Отправь мне фото-аватарку, которая будет видна всеми пользователям.\\n\"\r\n                         \"Было бы очень здорово, если бы на фото был действительно ты, ведь цель этой платформы открытое общение!\")\r\n\r\n    await state.set_state(Profile.photo)\r\n\r\n\r\n\r\n@registration_router.message(StateFilter(Profile.photo))\r\nasync def handle_avatar(message: Message, state: FSMContext):\r\n    if not message.photo:\r\n        await message.answer(\"Отправь мне фото!\")\r\n        return\r\n\r\n    ava = message.photo[-1]\r\n    ava_id = ava.file_id\r\n\r\n    await state.update_data(photo=ava_id)\r\n    await state.set_state(Profile.info)\r\n    await message.answer(\"Теперь расскажи подробней о себе в целом: \\n привычках, хобби, жизненной позиции\")\r\n\r\n\r\n@registration_router.message(StateFilter(Profile.info))\r\nasync def get_user_info(message: Message, state: FSMContext):\r\n    text = message.text\r\n    user_id = message.from_user.id\r\n\r\n    if len(text) < 20:\r\n        await message.answer(\"Слишком мало, расскажи побольше)\")\r\n        return\r\n\r\n    elif len(text) > 700:\r\n        await message.answer(\"Слишком длинное описание, чуть чуть подсократи.\")\r\n        return\r\n\r\n    await state.update_data(info=text)\r\n\r\n    try:\r\n        auth_api = AuthApi(user_id)\r\n        user_data = await state.get_data()\r\n        result = await auth_api.create_profile(user_data)\r\n\r\n        if result.status == CreateStatus.SUCCESS:\r\n            await message.answer(\"Профиль успешно создан!\")\r\n\r\n        if result.status == CreateStatus.NOT_AUTHENTICATED:\r\n            user_id = message.from_user.id\r\n            await message.answer(\"Кажется ты забыл авторизоваться! Я сохранил настройки твоего профиля,\"\r\n                                 \"он создастся, как только ты авторизуешься.(/authorization)\")\r\n\r\n            progress = ProfileProgress(user_id)\r\n            await progress.save_profile_progress(user_data) # сохраняем данные до того момента пока пользователь не авторизуется и только потом создаём профиль\r\n\r\n    except Exception as e:\r\n        print(e)\r\n        await message.answer(\"Непредвиденная ошибка! Попробуйте создать профиль ещё раз.\")\r\n\r\n    finally:\r\n        await state.clear()\r\n\r\n\r\n@registration_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == \"commands:edit_profile\")\r\nasync def start_edit_profile(callback: CallbackQuery):\r\n    keyboard = edit_profile_kb()\r\n    await callback.message.answer(text=\"Выбери то, что собираешься редактировать:\", reply_markup=keyboard)\r\n\r\nclass EditStates(StatesGroup):\r\n    photo = State()\r\n    info = State()\r\n\r\n@registration_router.callback_query(lambda cal: cal.data.startswith(\"edit\"))\r\nasync def choose_category(callback: CallbackQuery, state: FSMContext):\r\n    category = callback.data.split(\":\")[1]\r\n\r\n    if category == \"photo\":\r\n        await callback.message.answer(text=\"Пришли мне новое фото:\")\r\n        await state.set_state(EditStates.photo)\r\n\r\n    else:\r\n        await callback.message.answer(text=\"Пришли мне новое описание:\")\r\n        await state.set_state(EditStates.info)\r\n\r\n\r\n@registration_router.message(CheckAuthFilter(), StateFilter(EditStates.photo))\r\nasync def edit_photo(message: Message, state: FSMContext, token: str):\r\n    if not message.photo:\r\n        await message.answer(\"Пришли мне фото!\")\r\n        return\r\n\r\n    user_id = message.from_user.id\r\n    profile_api = UserProfileApi(user_id, token)\r\n\r\n    new_photo = message.photo[-1]\r\n    data = new_photo.file_id\r\n\r\n    result = await profile_api.edit_profile(data, category=\"photo\")\r\n\r\n    if result:\r\n        await message.answer(text=\"Фото обновлено!\")\r\n        await state.clear()\r\n\r\n\r\n@registration_router.message(CheckAuthFilter(), StateFilter(EditStates.info))\r\nasync def edit_info(message: Message, state: FSMContext, token: str):\r\n    if not message.text:\r\n        await message.answer(\"Пришли мне текст!\")\r\n        return\r\n\r\n    data = message.text\r\n\r\n    if len(data) < 20:\r\n        await message.answer(\"Слишком мало, расскажи побольше)\")\r\n        return\r\n\r\n    elif len(data) > 700:\r\n        await message.answer(\"Слишком длинное описание, чуть чуть подсократи.\")\r\n        return\r\n\r\n    user_id = message.from_user.id\r\n\r\n    profile_api = UserProfileApi(user_id, token)\r\n\r\n    result = await profile_api.edit_profile(data, category=\"info\")\r\n\r\n    if result:\r\n        await message.answer(text=\"Описание обновлено!\")\r\n        await state.clear()
+===================================================================
+diff --git a/handlers/registration.py b/handlers/registration.py
+--- a/handlers/registration.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/registration.py	(date 1748335060009)
+@@ -203,7 +203,7 @@
+         await state.clear()
+ 
+ 
+-@registration_router.callback_query(CheckAuthFilter(), lambda cal: cal.data == "commands:edit_profile")
++@registration_router.callback_query(lambda cal: cal.data == "commands:edit_profile", CheckAuthFilter())
+ async def start_edit_profile(callback: CallbackQuery):
+     keyboard = edit_profile_kb()
+     await callback.message.answer(text="Выбери то, что собираешься редактировать:", reply_markup=keyboard)
+@@ -225,7 +225,7 @@
+         await state.set_state(EditStates.info)
+ 
+ 
+-@registration_router.message(CheckAuthFilter(), StateFilter(EditStates.photo))
++@registration_router.message(StateFilter(EditStates.photo), CheckAuthFilter())
+ async def edit_photo(message: Message, state: FSMContext, token: str):
+     if not message.photo:
+         await message.answer("Пришли мне фото!")
+@@ -244,7 +244,7 @@
+         await state.clear()
+ 
+ 
+-@registration_router.message(CheckAuthFilter(), StateFilter(EditStates.info))
++@registration_router.message(StateFilter(EditStates.info), CheckAuthFilter())
+ async def edit_info(message: Message, state: FSMContext, token: str):
+     if not message.text:
+         await message.answer("Пришли мне текст!")
+@@ -268,4 +268,30 @@
+ 
+     if result:
+         await message.answer(text="Описание обновлено!")
+-        await state.clear()
+\ No newline at end of file
++        await state.clear()
++
++
++@registration_router.message(Command("deactivate"), CheckAuthFilter())
++async def deactivate_warning(message: Message):
++    text = ("❗ Ваш профиль будет удалён, но авторизационные данные останутся,"
++            "так что Вы сможете в любой момент заново его создать.")
++
++    btn = [[InlineKeyboardButton(text="Отключить профиль", callback_data="profile:deactivate")]]
++    kb = InlineKeyboardMarkup(inline_keyboard=btn)
++
++    await message.answer(text=text, reply_markup=kb)
++
++
++@registration_router.callback_query(lambda cal: cal.data == "profile:deactivate", CheckAuthFilter())
++async def profile_deactivate(callback: CallbackQuery, token: str):
++    user_id = callback.from_user.id
++
++    profile_api = UserProfileApi(user_id, token)
++
++    deactivate_result = await profile_api.deactivate_profile()
++
++    if deactivate_result:
++        await callback.message.answer(text="Профиль отключён! Скорее возвращайся!❤🙏")
++
++    else:
++        await callback.message.answer(text="Ошибка! Не могу отключить твой профиль!")
+\ No newline at end of file
+Index: handlers/settings.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from handlers.api.auth_api import AuthApi, ProfileStatus\r\nfrom aiogram.filters import Filter\r\nfrom aiogram.types import CallbackQuery, Message\r\n\r\n\r\nall_forms = [\r\n    \"6А\", \"6Б\", \"6В\", \"6Г\",\r\n    \"7А\", \"7Б\", \"7В\", \"7Г\", \"7Д\",\r\n    \"8А\", \"8Б\", \"8В\", \"8Д\",\r\n    \"9А\", \"9Б\", \"9В\", \"9Г\",\r\n    \"10А\", \"10Б\", \"10В\", \"10Г\",\r\n    \"11А\", \"11Б\"\r\n]\r\n\r\n\r\nclass CheckAuthFilter(Filter):\r\n    async def  __call__(self, request: CallbackQuery | Message):\r\n        user_id = request.from_user.id\r\n\r\n        auth_api = AuthApi(user_id)\r\n        result = await auth_api.login()\r\n\r\n        if result.status == ProfileStatus.HAS_PROFILE:\r\n            token = result.token\r\n            is_admin = result.is_admin\r\n\r\n            return {\"token\": token, \"is_admin\": is_admin}\r\n\r\n        else:\r\n            if type(request) == CallbackQuery:\r\n                await request.message.answer(\"Создайте профиль, чтобы воспользоваться этой функцией!(/personal)\")\r\n            else:\r\n                await request.answer(\"Создайте профиль, чтобы воспользоваться этой функцией!(/personal)\")\r\n\r\n            return False
+===================================================================
+diff --git a/handlers/settings.py b/handlers/settings.py
+--- a/handlers/settings.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/settings.py	(date 1748335060021)
+@@ -1,7 +1,13 @@
+ from handlers.api.auth_api import AuthApi, ProfileStatus
+ from aiogram.filters import Filter
+-from aiogram.types import CallbackQuery, Message
+-
++from aiogram.types import CallbackQuery, Message, TelegramObject
++from aiogram import BaseMiddleware, Bot
++from redis import asyncio as aioredis
++from decouple import config
++import time
++from typing import Any, Callable, Dict, Awaitable
++import aiohttp
++import ujson
+ 
+ all_forms = [
+     "6А", "6Б", "6В", "6Г",
+@@ -32,4 +38,48 @@
+             else:
+                 await request.answer("Создайте профиль, чтобы воспользоваться этой функцией!(/personal)")
+ 
+-            return False
+\ No newline at end of file
++            return False
++
++
++redis_domain = "localhost" # config("REDIS_DOMAIN")
++redis_password = None # config("REDIS_PASSWORD")
++
++async def is_user_banned(user_id: int):
++    redis = await aioredis.from_url(f"redis://{redis_domain}:6379/0", password=redis_password, max_connections=10,
++                                    decode_responses=True)
++
++    for user in await redis.smembers("ban_list"):
++        tg_id, expiry = user.split(":")
++
++        if str(user_id) == tg_id:
++            if int(expiry) == -1: # пользователь забанен навсегда
++                return True
++
++            if int(time.time() > int(expiry)):
++                await redis.srem("ban_list", user) # удаляем пользователя если срок бана истёк
++                return False
++
++            else:
++                return True
++
++    return False
++
++
++
++class BanCheckMiddleware(BaseMiddleware):
++    async def __call__(self,
++                       handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
++                       event: TelegramObject,
++                       data: Dict[str, Any]
++    ) -> Any:
++        user = data["event_from_user"]
++        user_id = user.id
++
++        if await is_user_banned(user_id):
++            await event.answer(
++                "🚫 Вы были заблокированы, и срок бана ещё не истёк!"
++            )
++            return
++
++        else:
++            return await handler(event, data)
+Index: handlers/interface.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton\r\nfrom aiogram.utils.keyboard import InlineKeyboardBuilder\r\nfrom decouple import config\r\nfrom .settings import all_forms\r\n\r\n\r\ndef get_grade_kb():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    for grade in range(6, 12):\r\n        keyboard.add(\r\n            InlineKeyboardButton(text=str(grade), callback_data=f\"grade:{grade}\"),\r\n        )\r\n\r\n    keyboard.adjust(3)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_letter_kb(grade):\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n\r\n    forms_letters = {\r\n        \"6\": (\"А\", \"Б\", \"В\", \"Г\"),\r\n        \"7\": (\"А\", \"Б\", \"В\", \"Г\", \"Д\"),\r\n        \"8\": (\"А\", \"Б\", \"В\", \"Д\"),\r\n        \"9\": (\"А\", \"Б\", \"В\", \"Г\"),\r\n        \"10\": (\"А\", \"Б\", \"В\", \"Г\"),\r\n        \"11\": (\"А\", \"Б\")\r\n    }\r\n\r\n    letters = forms_letters[grade]\r\n\r\n    for letter in letters:\r\n        keyboard.add(\r\n            InlineKeyboardButton(text=letter, callback_data=f\"grade_letter:{grade}{letter}\"),\r\n        )\r\n\r\n    keyboard.adjust(3)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_pagination_keyboard(data: dict, key_offset: int) -> InlineKeyboardMarkup:\r\n    keyboard = InlineKeyboardBuilder()\r\n    forms = all_forms\r\n    form = forms[key_offset]\r\n\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"⬅\uFE0F Назад\", callback_data=f\"form:{key_offset - 1}\"),\r\n        InlineKeyboardButton(text=form, callback_data=\"current_page\"),\r\n        InlineKeyboardButton(text=\"Вперед ➡\uFE0F\", callback_data=f\"form:{(key_offset + 1) % len(forms)}\")\r\n    )\r\n\r\n    if not data:\r\n        keyboard.add(InlineKeyboardButton(text=\"пусто\", callback_data=\"empty\"))\r\n\r\n    else:\r\n        for tg_id in data:\r\n            pupil = data[tg_id]\r\n            keyboard.add(InlineKeyboardButton(text=f\"{pupil['first_name']} {pupil['last_name']}\", callback_data=f\"pupil:{form}:{tg_id}\"))\r\n\r\n    keyboard.adjust(3, 2)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_sex_keyboard():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n    InlineKeyboardButton(text=\"Мужской\", callback_data=\"2\"),\r\n        InlineKeyboardButton(text=\"Женский\", callback_data=\"1\"),\r\n        InlineKeyboardButton(text=\"Не важно\", callback_data=\"0\")\r\n    )\r\n\r\n    keyboard.adjust(2)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_form_keyboard():\r\n    keyboard = InlineKeyboardBuilder()\r\n    btns = []\r\n\r\n    for i in range(6, 12):\r\n        btns.append(InlineKeyboardButton(text=str(i), callback_data=str(i)))\r\n\r\n    keyboard.add(*btns)\r\n\r\n    keyboard.adjust(3)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_feed_keyboard(tg_id: int, karma: int):\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Обменяться контактами\", callback_data=f\"exchange:{tg_id}:feed\"),\r\n        InlineKeyboardButton(text=f\"{str(karma)} ❤\", callback_data=f\"karma:{tg_id}:{karma}\"),\r\n        InlineKeyboardButton(text=\"Далее\", callback_data=\"Далее\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_request_keyboard(sender_id, sender_username):\r\n    buttons = [\r\n        [\r\n            InlineKeyboardButton(text=\"Обменяться\", callback_data=f\"agree:{sender_id}:{sender_username}\"),\r\n            InlineKeyboardButton(text=\"Отказаться\", callback_data=\"next_request\")\r\n        ]\r\n    ]\r\n\r\n    return InlineKeyboardMarkup(inline_keyboard=buttons)\r\n\r\n\r\ndef get_post_keyboard(user_id, likes, dislikes, post_id, creator_id, post_type):\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=f\"{likes} ❤\", callback_data=f\"like:{post_id}:{likes}:{dislikes}:{creator_id}:{post_type}\"),\r\n        InlineKeyboardButton(text=f\"{dislikes} \uD83D\uDC4E\", callback_data=f\"dislike:{post_id}:{likes}:{dislikes}:{creator_id}:{post_type}\"),\r\n    )\r\n\r\n    admin_ids = config(\"ADMIN_IDS\")\r\n\r\n    if str(user_id) in admin_ids:\r\n        keyboard.add(InlineKeyboardButton(text=\"Удалить пост\uD83D\uDED1\", callback_data=f\"admin:delete:{post_id}:{creator_id}\"))\r\n\r\n    keyboard.adjust(2)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_funds_keyboard():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Баланс\uD83D\uDC8E\", callback_data=\"balance\"),\r\n        InlineKeyboardButton(text=f\"Кошелёк автора\uD83D\uDC5B\", callback_data=f\"author_wallet\"),\r\n        InlineKeyboardButton(text=\"В чём отличие?\", callback_data=\"explain\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_choose_post_type_kb():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"текст\", callback_data=\"text\"),\r\n        InlineKeyboardButton(text=\"текст+фото\", callback_data=\"text_photo\"),\r\n        InlineKeyboardButton(text=\"голосовое\", callback_data=\"voice\"),\r\n        InlineKeyboardButton(text=\"кружочек\", callback_data=\"circle\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_post_stat_kb(post_id, offset, limit, stat):\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Далее\", callback_data=f\"stat:{offset % limit}:{limit}\"),\r\n        InlineKeyboardButton(text=\"Удалить пост❌\", callback_data=f\"user_delete:{post_id}\")\r\n    )\r\n\r\n    if stat:\r\n        keyboard.add(InlineKeyboardButton(text=\"Кто лайкнул?\", callback_data=f\"list_likers:{post_id}\"))\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_stars_keyboard():\r\n    builder = InlineKeyboardBuilder()\r\n    builder.button(text=f\"Оплатить 100 ⭐\uFE0F\", pay=True)\r\n\r\n    return builder.as_markup()\r\n\r\n\r\ndef edit_profile_kb():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Фото\uD83D\uDCF7\", callback_data=\"edit:photo\"),\r\n        InlineKeyboardButton(text=\"Инфо✏\", callback_data=\"edit:info\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_options_keyboard():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Доп пост➕1\uFE0F⃣\", callback_data=\"option:extra_post\"),\r\n        InlineKeyboardButton(text=\"Пост-лайки\", callback_data=\"option:stat\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_support_keyboard():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Stars⭐\uFE0F\", callback_data=\"support:stars\"),\r\n        InlineKeyboardButton(text=\"По номеру карты\", callback_data=\"support:credit_card\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_profile_commands():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Профиль\uD83D\uDE0E\", callback_data=\"commands:profile\"),\r\n        InlineKeyboardButton(text=\"Редактировать✏\", callback_data=\"commands:edit_profile\"),\r\n        InlineKeyboardButton(text=\"Заявки\uD83D\uDC8C\", callback_data=\"commands:friend_requests\"),\r\n        InlineKeyboardButton(text=\"Кошелёк\uD83D\uDC5B\", callback_data=\"commands:wallet\"),\r\n    )\r\n\r\n    keyboard.adjust(2, 1, 1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_search_commands():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Поиск\uD83D\uDD0D\", callback_data=\"commands:search\"),\r\n        InlineKeyboardButton(text=\"Лента\uD83C\uDF9E\", callback_data=\"commands:users_feed\"),\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_post_commands():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Создать\uD83D\uDD25\", callback_data=\"commands:create_post\"),\r\n        InlineKeyboardButton(text=\"Лента\uD83C\uDF9E\", callback_data=\"commands:posts\"),\r\n        InlineKeyboardButton(text=\"Статистика\uD83D\uDCD2\", callback_data=\"commands:stat\"),\r\n        InlineKeyboardButton(text=\"Опции\uD83D\uDCC8\", callback_data=\"commands:options\"),\r\n        InlineKeyboardButton(text=\"Майнинг\uD83D\uDC8E\", callback_data=\"commands:maining\")\r\n    )\r\n\r\n    keyboard.adjust(2, 2, 1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_chat_kb(online):\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=f\"Онлайн\uD83D\uDFE9 {online}\", callback_data=\"online\"),\r\n        InlineKeyboardButton(text=\"Поиск собеседника\uD83D\uDD0D\", callback_data=\"chat:search\"),\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef get_cancel_kb():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Отменить\", callback_data=\"chat:cancel\"),\r\n    )\r\n\r\n    keyboard.adjust()\r\n    return keyboard.as_markup()\r\n\r\n\r\ndef only_negative_kb():\r\n    keyboard = InlineKeyboardBuilder()\r\n\r\n    keyboard.add(\r\n        InlineKeyboardButton(text=\"Только негативные\", callback_data=\"negative:yes\"),\r\n        InlineKeyboardButton(text=\"Любые\", callback_data=\"negative:no\")\r\n    )\r\n\r\n    keyboard.adjust(1)\r\n    return keyboard.as_markup()
+===================================================================
+diff --git a/handlers/interface.py b/handlers/interface.py
+--- a/handlers/interface.py	(revision a3b13ed851a64050ee3473799ffe725f6f56ec5e)
++++ b/handlers/interface.py	(date 1748335060025)
+@@ -114,7 +114,7 @@
+     return InlineKeyboardMarkup(inline_keyboard=buttons)
+ 
+ 
+-def get_post_keyboard(user_id, likes, dislikes, post_id, creator_id, post_type):
++def get_post_keyboard(likes, dislikes, post_id, creator_id, post_type, is_admin):
+     keyboard = InlineKeyboardBuilder()
+ 
+     keyboard.add(
+@@ -122,10 +122,8 @@
+         InlineKeyboardButton(text=f"{dislikes} 👎", callback_data=f"dislike:{post_id}:{likes}:{dislikes}:{creator_id}:{post_type}"),
+     )
+ 
+-    admin_ids = config("ADMIN_IDS")
+-
+-    if str(user_id) in admin_ids:
+-        keyboard.add(InlineKeyboardButton(text="Удалить пост🛑", callback_data=f"admin:delete:{post_id}:{creator_id}"))
++    if is_admin:
++        keyboard.add(InlineKeyboardButton(text="Удалить пост🛑", callback_data=f"admin:delete_post:{post_id}:{creator_id}"))
+ 
+     keyboard.adjust(2)
+     return keyboard.as_markup()
+@@ -151,10 +149,11 @@
+         InlineKeyboardButton(text="текст", callback_data="text"),
+         InlineKeyboardButton(text="текст+фото", callback_data="text_photo"),
+         InlineKeyboardButton(text="голосовое", callback_data="voice"),
+-        InlineKeyboardButton(text="кружочек", callback_data="circle")
++        InlineKeyboardButton(text="кружочек", callback_data="circle"),
++        InlineKeyboardButton(text="видео", callback_data="video")
+     )
+ 
+-    keyboard.adjust(1)
++    keyboard.adjust(2, 2, 1)
+     return keyboard.as_markup()
+ 
+ 
+@@ -163,7 +162,7 @@
+ 
+     keyboard.add(
+         InlineKeyboardButton(text="Далее", callback_data=f"stat:{offset % limit}:{limit}"),
+-        InlineKeyboardButton(text="Удалить пост❌", callback_data=f"user_delete:{post_id}")
++        InlineKeyboardButton(text="Удалить пост❌", callback_data=f"user_delete_post:{post_id}")
+     )
+ 
+     if stat:
+@@ -289,4 +288,29 @@
+     )
+ 
+     keyboard.adjust(1)
++    return keyboard.as_markup()
++
++
++def user_card_action_kb(tg_id: int, is_admin: bool, user_is_admin: bool):
++    keyboard = InlineKeyboardBuilder()
++
++    keyboard.add(
++    InlineKeyboardButton(text="Обменяться контактами", callback_data=f"exchange:{tg_id}:search"),
++            InlineKeyboardButton(text="Скрыть", callback_data="hide_profile"))
++
++    if is_admin:
++        if user_is_admin:
++            promotion_text = "Исключить из админов❌"
++            action = "downgrade"
++
++        else:
++            promotion_text = "Сделать админом✅"
++            action = "upgrade"
++
++        keyboard.add(
++            InlineKeyboardButton(text=promotion_text, callback_data=f"promotion:{tg_id}:{action}"),
++            InlineKeyboardButton(text="Забанить🚫", callback_data=f"admin:ban_user:{tg_id}")
++        )
++
++    keyboard.adjust(1)
+     return keyboard.as_markup()
+\ No newline at end of file

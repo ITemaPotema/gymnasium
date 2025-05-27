@@ -1,0 +1,791 @@
+Index: gymcoins.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Depends, Request\r\nfrom fastapi.responses import JSONResponse\r\nfrom fastapi.templating import Jinja2Templates\r\nfrom sqlalchemy.orm import Session\r\nfrom sqlalchemy import update\r\nfrom database import *\r\nfrom app_config import auth, verify_init_data\r\nfrom authx import TokenPayload\r\nfrom shemas import Balance\r\n\r\ngymcoin_router = APIRouter()\r\n\r\ntemplates = Jinja2Templates(directory=\"templates\")\r\n\r\n@gymcoin_router.get(\"/gymcoins\")\r\ndef tap_gymcoin_view(request: Request):\r\n    return templates.TemplateResponse(\"tap_gymcoin.html\", context={\"request\": request})\r\n\r\n\r\n@gymcoin_router.get(\"/user/balance\")\r\ndef get_user_balance(payload: TokenPayload = Depends(auth.access_token_required), db: Session = Depends(get_db)):\r\n    user_id = int(payload.sub)\r\n    balance = db.query(Wallet.balance).filter_by(wallet_id=user_id).first()[0]\r\n\r\n    if balance is None:\r\n        return JSONResponse({\"error\": \"user not found\"}, status_code=404)\r\n\r\n    return JSONResponse({\"balance\": balance})\r\n\r\n\r\n@gymcoin_router.post(\"/gymcoins/save\")\r\ndef save_gymcoins(data: Balance,  db: Session = Depends(get_db)):\r\n    user_id = data.user_id\r\n    balance = data.balance\r\n    init_data = data.init_data\r\n\r\n    if not verify_init_data(init_data):\r\n        return JSONResponse(content={\"error\": \"no verified user\"}) #проверка подлинности запроса пользователя\r\n\r\n    user_exist = db.query(UsersPersonal).filter_by(tg_id=user_id).first()\r\n\r\n    if not user_exist:\r\n        return JSONResponse({\"error\": \"user not found\"}, status_code=404)\r\n\r\n    stmt = (\r\n        update(Wallet)\r\n        .filter_by(wallet_id=user_id)\r\n        .values(balance=Wallet.balance + balance)\r\n    )\r\n\r\n    db.execute(stmt)\r\n    db.commit()\r\n\r\n    return {\"status\": \"ok\"}\r\n\r\n\r\n@gymcoin_router.post(\"/gymcoins/withdraw\")\r\ndef withdraw_funds(funds_amount: int, db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = int(payload.sub)\r\n\r\n    stmt = update(Wallet).filter_by(wallet_id=user_id).values(balance=Wallet.balance + funds_amount)\r\n\r\n    db.execute(stmt)\r\n    db.commit()\r\n\r\n    return JSONResponse(content={\"status\": \"ok\"})\r\n
+===================================================================
+diff --git a/gymcoins.py b/gymcoins.py
+--- a/gymcoins.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/gymcoins.py	(date 1748336739361)
+@@ -4,10 +4,11 @@
+ from sqlalchemy.orm import Session
+ from sqlalchemy import update
+ from database import *
+-from app_config import auth, verify_init_data
++from app_config import auth, verify_init_data, get_user_id
+ from authx import TokenPayload
+ from shemas import Balance
+ 
++
+ gymcoin_router = APIRouter()
+ 
+ templates = Jinja2Templates(directory="templates")
+@@ -30,12 +31,15 @@
+ 
+ @gymcoin_router.post("/gymcoins/save")
+ def save_gymcoins(data: Balance,  db: Session = Depends(get_db)):
+-    user_id = data.user_id
+     balance = data.balance
+     init_data = data.init_data
++    user_id = get_user_id(init_data)
+ 
+-    if not verify_init_data(init_data):
+-        return JSONResponse(content={"error": "no verified user"}) #проверка подлинности запроса пользователя
++    if not verify_init_data(init_data): # проверка подлинности запроса
++        return JSONResponse(content={"error": "invalid params"}, status_code=400)
++
++    if balance > 10000: # если вывод подозрительно большой
++        return JSONResponse(content={"error": "user is not verified"}, status_code=403)
+ 
+     user_exist = db.query(UsersPersonal).filter_by(tg_id=user_id).first()
+ 
+Index: app_config.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from decouple import config\r\nfrom authx import AuthXConfig, AuthX\r\nfrom datetime import timedelta\r\nimport logging\r\nimport hmac\r\nimport hashlib\r\nfrom urllib.parse import parse_qsl\r\n\r\n\r\nlogging.basicConfig(\r\n    level=logging.INFO,\r\n    format=\"%(asctime)s - %(name)s - %(levelname)s - %(message)s\",\r\n    filename=\"app.log\",\r\n    filemode=\"a\"\r\n)\r\nlogger = logging.getLogger(\"app\")\r\nlogger.setLevel(logging.INFO)\r\n\r\nfh = logging.FileHandler(\"app.log\")\r\nfh.setLevel(logging.INFO)\r\n\r\nformatter = logging.Formatter(\"%(asctime)s - %(name)s - %(levelname)s - %(message)s\")\r\nfh.setFormatter(formatter)\r\n\r\nlogger.addHandler(fh)\r\n\r\n\r\nauth_config = AuthXConfig(\r\n        JWT_ALGORITHM = \"HS256\",\r\n        JWT_SECRET_KEY = config(\"RANDOM_SECRET\"),\r\n        JWT_TOKEN_LOCATION = [\"headers\"],\r\n        JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=20),\r\n)\r\n\r\nauth = AuthX(config=auth_config)\r\n\r\nSECRET_KEY = config(\"SECRET_KEY\")\r\n\r\n# проверка подписи в запросе общим секретным ключом\r\ndef verify_signature(data: str, signature: str) -> bool:\r\n    expected_signature = hmac.new(\r\n        SECRET_KEY.encode(),\r\n        data.encode(),\r\n        hashlib.sha256\r\n    ).hexdigest()\r\n\r\n    return hmac.compare_digest(expected_signature, signature)\r\n\r\n\r\nBOT_TOKEN = config(\"BOT_TOKEN\")\r\n\r\n# функция проверки, что запрос пришёл от авторизованного пользователя telegram\r\ndef verify_init_data(init_data):\r\n    parsed_data = dict(parse_qsl(init_data))\r\n    hash_str = parsed_data.pop(\"hash\", None)\r\n\r\n    if not hash_str:\r\n        return False\r\n\r\n    # Сортируем параметры и формируем строку для проверки\r\n    data_check_string = \"\\n\".join(\r\n        f\"{key}={value}\"\r\n        for key, value in sorted(parsed_data.items())\r\n    )\r\n\r\n    # Вычисляем HMAC-SHA-256\r\n    secret_key = hmac.new(\r\n        key=b\"key\",\r\n        msg=BOT_TOKEN.encode(),\r\n        digestmod=hashlib.sha256\r\n    ).digest()\r\n\r\n    computed_hash = hmac.new(\r\n        key=secret_key,\r\n        msg=data_check_string.encode(),\r\n        digestmod=hashlib.sha256\r\n    ).hexdigest()\r\n\r\n    return computed_hash == hash_str\r\n\r\nall_forms = [\r\n    \"6А\", \"6Б\", \"6В\", \"6Г\",\r\n    \"7А\", \"7Б\", \"7В\", \"7Г\", \"7Д\",\r\n    \"8А\", \"8Б\", \"8В\", \"8Д\",\r\n    \"9А\", \"9Б\", \"9В\", \"9Г\",\r\n    \"10А\", \"10Б\", \"10В\", \"10Г\",\r\n    \"11А\", \"11Б\"\r\n]
+===================================================================
+diff --git a/app_config.py b/app_config.py
+--- a/app_config.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/app_config.py	(date 1748259420014)
+@@ -1,3 +1,4 @@
++import json
+ from decouple import config
+ from authx import AuthXConfig, AuthX
+ from datetime import timedelta
+@@ -5,7 +6,8 @@
+ import hmac
+ import hashlib
+ from urllib.parse import parse_qsl
+-
++from redis import Redis
++import time
+ 
+ logging.basicConfig(
+     level=logging.INFO,
+@@ -36,7 +38,6 @@
+ 
+ SECRET_KEY = config("SECRET_KEY")
+ 
+-# проверка подписи в запросе общим секретным ключом
+ def verify_signature(data: str, signature: str) -> bool:
+     expected_signature = hmac.new(
+         SECRET_KEY.encode(),
+@@ -48,13 +49,39 @@
+ 
+ 
+ BOT_TOKEN = config("BOT_TOKEN")
++REDIS_DOMAIN = config("REDIS_DOMAIN")
++REDIS_PASSWORD = config("REDIS_PASSWORD")
++
++def get_redis():
++    return Redis(host=REDIS_DOMAIN, password=REDIS_PASSWORD, port=6379, db=1)
+ 
+-# функция проверки, что запрос пришёл от авторизованного пользователя telegram
+-def verify_init_data(init_data):
++def get_user_id(init_data: str):
++    parsed_data = dict(parse_qsl(init_data))
++    user_json = parsed_data.get("user", "{}")
++
++    user_data = json.loads(user_json)
++    user_id = int(user_data.get("id"))
++
++    return user_id
++
++
++def verify_init_data(init_data: str):
++    redis = get_redis()
+     parsed_data = dict(parse_qsl(init_data))
+     hash_str = parsed_data.pop("hash", None)
++    query_id = parsed_data.get("query_id")
++    auth_date = parsed_data.get("auth_date")
+ 
+-    if not hash_str:
++    if not hash_str or not query_id or not auth_date:
++        return False
++
++    delta = time.time() - float(auth_date)
++    if delta > 3600 * 2: # проверка, что запрос не старый (2 часа)
++        return False
++
++    print(f"Время последнего auth: {delta}", f"query_id={query_id}")
++
++    if redis.get(f"used_query_id:{query_id}"): # проверка того, что данный query_id не был в недавних запросах
+         return False
+ 
+     # Сортируем параметры и формируем строку для проверки
+@@ -65,7 +92,7 @@
+ 
+     # Вычисляем HMAC-SHA-256
+     secret_key = hmac.new(
+-        key=b"key",
++        key=b"WebAppData",
+         msg=BOT_TOKEN.encode(),
+         digestmod=hashlib.sha256
+     ).digest()
+@@ -76,7 +103,11 @@
+         digestmod=hashlib.sha256
+     ).hexdigest()
+ 
+-    return computed_hash == hash_str
++    # сверяем хэши
++    if computed_hash == hash_str:
++        redis.setex(f"used_query_id:{query_id}", 3600 * 2, query_id) # сохраняем query id на 2 часа
++        return True
++
+ 
+ all_forms = [
+     "6А", "6Б", "6В", "6Г",
+Index: app.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import FastAPI, Request\r\nfrom fastapi.responses import JSONResponse\r\nfrom fastapi.exceptions import RequestValidationError\r\nimport uvicorn\r\nfrom database import *\r\nfrom auth import auth_router\r\nfrom user_profile import profile_router\r\nfrom user_search import search_router\r\nfrom posts_feed import feed_router\r\nfrom gymcoins import gymcoin_router\r\nfrom fastapi.staticfiles import StaticFiles\r\nfrom fastapi.middleware.cors import CORSMiddleware\r\n\r\n\r\napp = FastAPI()\r\napp.mount(\"/static\", StaticFiles(directory=\"static\"), name=\"static\")\r\napp.add_middleware(\r\n    CORSMiddleware,\r\n    allow_origins=[\r\n            \"http://0.0.0.0:8000\",\r\n            \"https://gymnazium587-itemapotema.amvera.io\",\r\n            \"https://telegrambot-itemapotema.amvera.io\"\r\n        ],\r\n)\r\napp.include_router(auth_router)\r\napp.include_router(profile_router)\r\napp.include_router(search_router)\r\napp.include_router(feed_router)\r\napp.include_router(gymcoin_router)\r\n\r\n\r\n\r\n\r\nBase.metadata.create_all(bind=engine)\r\n\r\n\r\n@app.exception_handler(RequestValidationError)\r\ndef validation_exception_handler(request: Request, err: RequestValidationError):\r\n    return JSONResponse({\"message\": \"Некорректный формат данных!\"}, status_code=400)\r\n\r\n\r\nif __name__ == \"__main__\":\r\n    uvicorn.run(app, host=\"0.0.0.0\",\r\n                port=8000,\r\n                )
+===================================================================
+diff --git a/app.py b/app.py
+--- a/app.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/app.py	(date 1748327501915)
+@@ -8,6 +8,7 @@
+ from user_search import search_router
+ from posts_feed import feed_router
+ from gymcoins import gymcoin_router
++from admin import admin_router
+ from fastapi.staticfiles import StaticFiles
+ from fastapi.middleware.cors import CORSMiddleware
+ 
+@@ -27,6 +28,7 @@
+ app.include_router(search_router)
+ app.include_router(feed_router)
+ app.include_router(gymcoin_router)
++app.include_router(admin_router)
+ 
+ 
+ 
+@@ -40,6 +42,6 @@
+ 
+ 
+ if __name__ == "__main__":
+-    uvicorn.run(app, host="0.0.0.0",
++    uvicorn.run(app, host="localhost",
+                 port=8000,
+                 )
+\ No newline at end of file
+Index: user_profile.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Depends, Request\r\nfrom fastapi.responses import JSONResponse\r\nfrom sqlalchemy.orm import Session\r\nfrom sqlalchemy import update\r\nfrom database import *\r\nfrom shemas import UserProfile, EditProfile\r\nfrom app_config import auth, verify_signature\r\nfrom authx import TokenPayload\r\n\r\nprofile_router = APIRouter()\r\n\r\n@profile_router.post(\"/create_profile\")\r\ndef create_profile(request: Request, user: UserProfile, db: Session = Depends(get_db)):\r\n    signature = request.headers.get(\"x-signature\") # подпись бота\r\n    user_id = user.tg_id\r\n\r\n    if not verify_signature(str(user_id), signature):\r\n        return JSONResponse({\"error\": \"no matches in signature comparison\"}, status_code=400)\r\n\r\n    user_authenticated = db.query(UsersPersonal).filter_by(tg_id=user_id).first()\r\n\r\n    if not user_authenticated:\r\n        return JSONResponse(content={\"error\": \"user is not authenticated\"}, status_code=401)\r\n\r\n    data = {\r\n        \"tg_id\": user_id,\r\n        \"photo\": user.photo,\r\n        \"info\": user.info,\r\n        \"form\": user.form,\r\n    }\r\n\r\n    new_profile = UsersGeneral(**data)\r\n    wallet = Wallet(wallet_id=user.tg_id)\r\n\r\n    db.add(new_profile)\r\n    db.add(wallet)\r\n\r\n    db.commit()\r\n\r\n    return JSONResponse({\"message\": \"profile is created successfully\"})\r\n\r\n\r\n@profile_router.get(\"/profile\")\r\ndef profile_view(payload: TokenPayload = Depends(auth.access_token_required), db: Session = Depends(get_db)):\r\n    tg_id = int(payload.sub)\r\n\r\n    profile = db.query(UsersGeneral).filter_by(tg_id=tg_id).first()\r\n\r\n    if profile:\r\n        content = {\r\n            \"first_name\": profile.personal_info.first_name,\r\n            \"last_name\": profile.personal_info.last_name,\r\n            \"form\": profile.form,\r\n            \"photo\": profile.photo,\r\n            \"info\": profile.info,\r\n            \"karma\": profile.karma\r\n        }\r\n        return JSONResponse(content=content)\r\n\r\n    return JSONResponse({\"message\": \"profile not found\"}, status_code=404)\r\n\r\n\r\n@profile_router.patch(\"/edit/{category}\")\r\ndef edit_profile(category: str, edit: EditProfile,  db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = int(payload.sub)\r\n\r\n    if category == \"photo\":\r\n        stmt = update(UsersGeneral).filter_by(tg_id=user_id).values(photo=edit.data)\r\n\r\n    else:\r\n        stmt = update(UsersGeneral).filter_by(tg_id=user_id).values(info=edit.data)\r\n\r\n    db.execute(stmt)\r\n    db.commit()\r\n\r\n    return JSONResponse(content={\"status\": \"ok\"})\r\n
+===================================================================
+diff --git a/user_profile.py b/user_profile.py
+--- a/user_profile.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/user_profile.py	(date 1748259419998)
+@@ -9,9 +9,11 @@
+ 
+ profile_router = APIRouter()
+ 
+-@profile_router.post("/create_profile")
++admin_tg_id = config("ADMIN_ID")
++
++@profile_router.post("/profile/create")
+ def create_profile(request: Request, user: UserProfile, db: Session = Depends(get_db)):
+-    signature = request.headers.get("x-signature") # подпись бота
++    signature = request.headers.get("x-signature")
+     user_id = user.tg_id
+ 
+     if not verify_signature(str(user_id), signature):
+@@ -22,11 +24,14 @@
+     if not user_authenticated:
+         return JSONResponse(content={"error": "user is not authenticated"}, status_code=401)
+ 
++    is_admin = (str(user_id) == admin_tg_id) # проверка на суперадмина
++
+     data = {
+         "tg_id": user_id,
+         "photo": user.photo,
+         "info": user.info,
+         "form": user.form,
++        "is_admin": is_admin
+     }
+ 
+     new_profile = UsersGeneral(**data)
+@@ -53,14 +58,15 @@
+             "form": profile.form,
+             "photo": profile.photo,
+             "info": profile.info,
+-            "karma": profile.karma
++            "karma": profile.karma,
++            "is_admin": bool(profile.is_admin)
+         }
+         return JSONResponse(content=content)
+ 
+     return JSONResponse({"message": "profile not found"}, status_code=404)
+ 
+ 
+-@profile_router.patch("/edit/{category}")
++@profile_router.patch("/profile/edit/{category}")
+ def edit_profile(category: str, edit: EditProfile,  db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):
+     user_id = int(payload.sub)
+ 
+@@ -74,3 +80,16 @@
+     db.commit()
+ 
+     return JSONResponse(content={"status": "ok"})
++
++
++@profile_router.delete("/profile/deactivate")
++def deactivate_profile(db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):
++    user_id = int(payload.sub)
++
++    user = db.get(UsersGeneral, user_id)
++
++    if user:
++        db.delete(user)
++        db.commit()
++
++    return JSONResponse(content={"status": "profile is deleted"})
+\ No newline at end of file
+Index: shemas.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from pydantic import BaseModel\r\nfrom typing import Optional\r\n\r\nclass UserVkData(BaseModel):\r\n    tg_id: int\r\n    vk_id: int\r\n    tg_name: str\r\n    access_token: str\r\n    init_data: str\r\n\r\n\r\nclass VkUser(BaseModel):\r\n    first_name: str\r\n    last_name: str\r\n    sex: int\r\n\r\nclass ProfileRequest(BaseModel):\r\n    tg_id: int\r\n\r\nclass UserProfile(BaseModel):\r\n    tg_id: int\r\n    photo: str\r\n    info: str\r\n    form: str\r\n\r\nclass Post(BaseModel):\r\n    post_id: int\r\n    text: str\r\n    content: str\r\n    likes: int\r\n    dislikes: int\r\n    creator_id: int\r\n    describe: str\r\n    type: str\r\n    toxicity: Optional[str]\r\n\r\n\r\nclass PostCreate(BaseModel):\r\n    text: str\r\n    content: str\r\n    describe: str\r\n    type: str\r\n\r\n\r\nclass PostStat(BaseModel):\r\n    post_id: int\r\n    describe: str\r\n    likes: int\r\n    dislikes: int\r\n    type: str\r\n\r\n\r\nclass Balance(BaseModel):\r\n    user_id: int\r\n    balance: int\r\n    init_data: str\r\n\r\n\r\nclass Likers(BaseModel):\r\n    likers: list[int]\r\n\r\n\r\nclass EditProfile(BaseModel):\r\n    data: str\r\n\r\nclass TokenRequest(BaseModel):\r\n    user_id: int\r\n\r\nclass IphoneUser(BaseModel):\r\n    tg_id: int\r\n    vk_id: int\r\n    tg_name: str\r\n
+===================================================================
+diff --git a/shemas.py b/shemas.py
+--- a/shemas.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/shemas.py	(date 1748161780660)
+@@ -1,8 +1,8 @@
+ from pydantic import BaseModel
+ from typing import Optional
++from enum import Enum
+ 
+ class UserVkData(BaseModel):
+-    tg_id: int
+     vk_id: int
+     tg_name: str
+     access_token: str
+@@ -51,9 +51,8 @@
+ 
+ 
+ class Balance(BaseModel):
+-    user_id: int
++    init_data: str
+     balance: int
+-    init_data: str
+ 
+ 
+ class Likers(BaseModel):
+@@ -70,3 +69,10 @@
+     tg_id: int
+     vk_id: int
+     tg_name: str
++
++class UserID(BaseModel):
++    tg_id: int
++
++class UserPromotion(Enum):
++    DOWNGRADE = "downgrade"
++    UPGRADE = "upgrade"
+\ No newline at end of file
+Index: database.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from sqlalchemy.orm import Mapped, mapped_column, relationship\r\nfrom sqlalchemy import create_engine, Column, ForeignKey, Text, DateTime\r\nfrom sqlalchemy.orm import DeclarativeBase, sessionmaker\r\nfrom decouple import config\r\n\r\nengine = create_engine(config(\"DB_URL\"), connect_args={\"check_same_thread\": False})\r\nclass Base(DeclarativeBase): pass\r\n\r\nSessionLocal = sessionmaker(bind=engine)\r\n\r\ndef get_db():\r\n    with SessionLocal() as session:\r\n        yield session\r\n\r\n\r\nclass UsersPersonal(Base):\r\n    __tablename__ = \"personals\"\r\n\r\n    tg_id: Mapped[int] = mapped_column(primary_key=True)\r\n    vk_id: Mapped[int]\r\n    tg_name: Mapped[str]\r\n    first_name: Mapped[str]\r\n    last_name: Mapped[str]\r\n    sex: Mapped[int]\r\n\r\n\r\n    general_info: Mapped[\"UsersGeneral\"] = relationship(back_populates=\"personal_info\")\r\n    wallet_info: Mapped[\"Wallet\"] = relationship(back_populates=\"personal_info\")\r\n\r\n\r\nclass UsersGeneral(Base):\r\n    __tablename__ = \"generals\"\r\n\r\n    tg_id: Mapped[int] = mapped_column(ForeignKey(\"personals.tg_id\", ondelete=\"CASCADE\"), primary_key=True)\r\n    photo: Mapped[str]\r\n    info = Column(Text)\r\n    karma: Mapped[int] = mapped_column(default=0)\r\n    form: Mapped[str]\r\n\r\n\r\n    personal_info: Mapped[\"UsersPersonal\"] = relationship(back_populates=\"general_info\")\r\n    posts: Mapped[list[\"Posts\"]] = relationship(back_populates=\"user_general\")\r\n\r\n\r\nclass Posts(Base):\r\n    __tablename__ = \"posts\"\r\n\r\n    post_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)\r\n    time_create = Column(DateTime)\r\n    text: Mapped[str] = mapped_column(nullable=True)\r\n    content: Mapped[str] = mapped_column(nullable=True)\r\n    likes: Mapped[int] = mapped_column(default=0)\r\n    dislikes: Mapped[int] = mapped_column(default=0)\r\n    creator_id: Mapped[int] = mapped_column(ForeignKey(\"generals.tg_id\", ondelete=\"CASCADE\"))\r\n    describe: Mapped[str]\r\n    type: Mapped[str]\r\n    toxicity: Mapped[str] = mapped_column(nullable=True)\r\n\r\n    user_general: Mapped[\"UsersGeneral\"] = relationship(back_populates=\"posts\")\r\n\r\n\r\n\r\nclass Wallet(Base):\r\n    __tablename__ = \"wallet\"\r\n\r\n    wallet_id: Mapped[int] = mapped_column(ForeignKey(\"personals.tg_id\", ondelete=\"CASCADE\"), primary_key=True)\r\n    balance: Mapped[int] = mapped_column(default=0)\r\n\r\n    personal_info: Mapped[\"UsersPersonal\"] = relationship(back_populates=\"wallet_info\")\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n
+===================================================================
+diff --git a/database.py b/database.py
+--- a/database.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/database.py	(date 1748329295316)
+@@ -23,50 +23,76 @@
+     last_name: Mapped[str]
+     sex: Mapped[int]
+ 
+-
+-    general_info: Mapped["UsersGeneral"] = relationship(back_populates="personal_info")
+-    wallet_info: Mapped["Wallet"] = relationship(back_populates="personal_info")
++    general_info: Mapped["UsersGeneral"] = relationship(
++        back_populates="personal_info",
++        cascade="all, delete"
++    )
+ 
+ 
+ class UsersGeneral(Base):
+     __tablename__ = "generals"
+ 
+-    tg_id: Mapped[int] = mapped_column(ForeignKey("personals.tg_id", ondelete="CASCADE"), primary_key=True)
++    tg_id: Mapped[int] = mapped_column(
++        ForeignKey("personals.tg_id", ondelete="CASCADE"),
++        primary_key=True
++    )
+     photo: Mapped[str]
+     info = Column(Text)
+     karma: Mapped[int] = mapped_column(default=0)
+     form: Mapped[str]
++    is_admin: Mapped[int]
+ 
++    personal_info: Mapped["UsersPersonal"] = relationship(
++        back_populates="general_info",
++    )
+ 
+-    personal_info: Mapped["UsersPersonal"] = relationship(back_populates="general_info")
+-    posts: Mapped[list["Posts"]] = relationship(back_populates="user_general")
++    posts: Mapped[list["Posts"]] = relationship(
++        back_populates="user_general",
++        cascade="all, delete",
++    )
++
++    wallet_info: Mapped["Wallet"] = relationship(
++        back_populates="general_info",
++        cascade="all, delete"
++    )
+ 
+ 
+ class Posts(Base):
+     __tablename__ = "posts"
+ 
+-    post_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
++    post_id: Mapped[int] = mapped_column(
++        primary_key=True,
++        autoincrement=True
++    )
+     time_create = Column(DateTime)
+     text: Mapped[str] = mapped_column(nullable=True)
+     content: Mapped[str] = mapped_column(nullable=True)
+     likes: Mapped[int] = mapped_column(default=0)
+     dislikes: Mapped[int] = mapped_column(default=0)
+-    creator_id: Mapped[int] = mapped_column(ForeignKey("generals.tg_id", ondelete="CASCADE"))
++    creator_id: Mapped[int] = mapped_column(
++        ForeignKey("generals.tg_id", ondelete="CASCADE")
++    )
+     describe: Mapped[str]
+     type: Mapped[str]
+     toxicity: Mapped[str] = mapped_column(nullable=True)
+ 
+-    user_general: Mapped["UsersGeneral"] = relationship(back_populates="posts")
+-
++    user_general: Mapped["UsersGeneral"] = relationship(
++        back_populates="posts",
++    )
+ 
+ 
+ class Wallet(Base):
+     __tablename__ = "wallet"
+ 
+-    wallet_id: Mapped[int] = mapped_column(ForeignKey("personals.tg_id", ondelete="CASCADE"), primary_key=True)
++    wallet_id: Mapped[int] = mapped_column(
++        ForeignKey("generals.tg_id", ondelete="CASCADE"),
++        primary_key=True
++    )
+     balance: Mapped[int] = mapped_column(default=0)
+ 
+-    personal_info: Mapped["UsersPersonal"] = relationship(back_populates="wallet_info")
++    general_info: Mapped["UsersGeneral"] = relationship(
++        back_populates="wallet_info",
++    )
+ 
+ 
+ 
+Index: auth.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Request, Depends\r\nfrom fastapi.responses import JSONResponse\r\nfrom sqlalchemy.orm import Session\r\nfrom fastapi.templating import Jinja2Templates\r\nfrom database import *\r\nimport vk_api\r\nfrom decouple import config\r\nfrom shemas import UserVkData, TokenRequest, IphoneUser\r\nfrom app_config import auth, logger, verify_signature, verify_init_data\r\n\r\n\r\n\r\n\r\nauth_router = APIRouter()\r\n\r\ntemplates = Jinja2Templates(directory=\"templates\")\r\n\r\n\r\n@auth_router.get(\"/auth_vk\")\r\ndef empty_auth(request: Request):\r\n    user_system = request.headers.get(\"User-Agent\")\r\n    logger.error(f\"Redirect error. User {user_system } was redirected on page he shoudn`t during VK authorization\")\r\n\r\n    context = {\r\n        \"request\": request,\r\n        \"message\": \"Ошибка! Не удалось авторизоваться!\",\r\n        \"comment\": \"Возможно проблема в ОС Вашего устройства. Если Вы сейчас заходите с IPhone укажите IOS в начальном диалоге авторизации!\"\r\n    }\r\n\r\n    return templates.TemplateResponse(\"finish_authorization.html\", context=context)\r\n\r\n@auth_router.get(\"/welcome_authorization\")\r\ndef welcome_to_authorization(request: Request):\r\n    user_system = request.headers.get(\"User-Agent\")\r\n\r\n    logger.info(f\"client: {request.client.host}:{request.client.port}\")\r\n    logger.info(f\"Start login process by {user_system}\")\r\n    return templates.TemplateResponse(\"welcome_authorization.html\", {\"request\": request})\r\n\r\n\r\n@auth_router.get(\"/authorization\")\r\ndef authorize_with_vk(request: Request):\r\n    return templates.TemplateResponse(\"authorization.html\", {\"request\": request})\r\n\r\n\r\n@auth_router.get(\"/finish_authorization\")\r\ndef answer_with_success(request: Request, status: int):\r\n    user_system = request.headers.get(\"User-Agent\")\r\n\r\n    context = {\r\n        \"request\": request,\r\n        \"message\": None,\r\n        \"comment\": None\r\n    }\r\n\r\n    if status == 201:\r\n        context[\"message\"] = \"Такой пользователь уже авторизован!\"\r\n        context[\"comment\"] = \"Вернитесь в бота и создайте свой личный профиль, если Вы ещё этого не сделали(/personal).\"\r\n        logger.info(\"User is already authorized\")\r\n\r\n    elif status == 200:\r\n        context[\"message\"] = \"Поздравляем! Авторизация прошла успешно!\"\r\n        context[\"comment\"] = \"Вернитесь в бота и создайте свой личный профиль(/personal)\"\r\n        logger.info(f\"Succesful authorization by {user_system}\")\r\n\r\n    elif status == 400:\r\n        context[\"message\"] = \"Ошибка! Не удалось авторизоваться!\"\r\n        context[\"comment\"] = \"Попробуйте ещё раз!\"\r\n        logger.error(f\"Authorization error by {user_system}\")\r\n\r\n    return templates.TemplateResponse(\"finish_authorization.html\", context=context)\r\n\r\n@auth_router.post(\"/auth_iphone\")\r\ndef auth_iphone(request: Request, data: IphoneUser, db: Session = Depends(get_db)):\r\n    user_id = data.tg_id\r\n    signature = request.headers.get(\"x-signature\")\r\n\r\n    if not verify_signature(str(user_id), signature):\r\n        return JSONResponse(content={\"error\": \"no matches in signature comparison\"}, status_code=400)\r\n\r\n    user_exist = db.query(UsersPersonal).filter_by(tg_id=user_id).first()\r\n\r\n    if user_exist:\r\n        return JSONResponse({\"message\": \"user already exists\"}, status_code=201)\r\n\r\n    try:\r\n        vk_session = vk_api.VkApi(token=config(\"VK_TOKEN\"))\r\n        vk = vk_session.get_api()\r\n        user = vk.users.get(user_ids=data.vk_id, fields='first_name, last_name, sex', lang=\"ru\")[0]\r\n\r\n        data = {\r\n            \"tg_id\": data.tg_id,\r\n            \"vk_id\": data.vk_id,\r\n            \"tg_name\": data.tg_name,\r\n            \"first_name\": user[\"first_name\"],\r\n            \"last_name\": user[\"last_name\"],\r\n            \"sex\": user[\"sex\"],\r\n        }\r\n\r\n        new_pupil = UsersPersonal(**data)\r\n        db.add(new_pupil)\r\n        db.commit()\r\n        print(\"Добавлен новый ученик\")\r\n\r\n        return JSONResponse({\"message\": \"ok\"}, status_code=200)\r\n\r\n    except Exception as e:\r\n        print(e)\r\n        return JSONResponse({\"status\": \"VK api error\"}, status_code=400)\r\n\r\n@auth_router.post(\"/auth\")\r\ndef verify_user_with_vk_id(user_data: UserVkData, db: Session = Depends(get_db)):\r\n    access_token, tg_id, vk_id, tg_name, init_data = user_data.access_token, user_data.tg_id, user_data.vk_id, user_data.tg_name, user_data.init_data\r\n\r\n    if not verify_init_data(init_data):\r\n        return JSONResponse(content={\"error\": \"no verified user\"}, status_code=401)\r\n\r\n    user_exist = db.query(UsersPersonal).filter_by(tg_id=tg_id).first()\r\n\r\n    if user_exist:\r\n        return JSONResponse({\"message\": \"user already exists\"}, status_code=201)\r\n\r\n    try:\r\n        # пробуем авторизоваться через access token\r\n        vk_session = vk_api.VkApi(token=access_token)\r\n        vk = vk_session.get_api()\r\n        user = vk.users.get(fields='first_name, last_name, sex', lang=\"ru\")[0]\r\n        print(\"Авторизация через токен\")\r\n\r\n    except Exception as e:\r\n        print(e)\r\n        # в случае исключения через vk_id\r\n        try:\r\n            vk_session = vk_api.VkApi(token=config(\"VK_TOKEN\"))\r\n            vk = vk_session.get_api()\r\n            user = vk.users.get(user_ids=vk_id, fields='first_name, last_name, sex', lang=\"ru\")[0]\r\n            print(\"Авторизация через id\")\r\n\r\n        except Exception as e:\r\n            print(e)\r\n            return JSONResponse({\"status\": \"VK api error\"}, status_code=400)\r\n\r\n    data = {\r\n        \"tg_id\": tg_id,\r\n        \"vk_id\": vk_id,\r\n        \"tg_name\": tg_name,\r\n        \"first_name\": user[\"first_name\"],\r\n        \"last_name\": user[\"last_name\"],\r\n        \"sex\": user[\"sex\"],\r\n    }\r\n\r\n    new_pupil = UsersPersonal(**data)\r\n    db.add(new_pupil)\r\n    db.commit()\r\n    print(\"Добавлен новый ученик\")\r\n\r\n    return JSONResponse({\"message\": \"ok\"}, status_code=200)\r\n\r\n# эндпоинт для получения access токена. Telegram bot автоматически посылает запрос на этот эндпоинт по истечению\r\n# времени access токена. В качестве конфиденциальных данных в обмен на токен бот отправляет подпись, созданную с помощью\r\n# общего секретного ключа. Бэкенд проверяет подпись и возвращает access токен в случае успешной проверки\r\n\r\n@auth_router.post(\"/sign_in\")\r\ndef get_access__token(request: Request, data: TokenRequest, db: Session = Depends(get_db)):\r\n    user_id = data.user_id\r\n    signature = request.headers.get(\"x-signature\") # подпись telegram бота\r\n\r\n    if not verify_signature(str(user_id), signature): # проверка подписи\r\n        return JSONResponse(content={\"error\": \"no matches in signature comparison\"}, status_code=400)\r\n\r\n    has_profile = db.query(UsersGeneral).filter_by(tg_id=user_id).first()\r\n\r\n    if not has_profile:\r\n        return JSONResponse(content={\"error\": \"has no profile\"}, status_code=404)\r\n\r\n    access_token = auth.create_access_token(uid=str(user_id))\r\n\r\n    return JSONResponse(content={\"access_token\": access_token})\r\n\r\n\r\n
+===================================================================
+diff --git a/auth.py b/auth.py
+--- a/auth.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/auth.py	(date 1748092100606)
+@@ -6,7 +6,7 @@
+ import vk_api
+ from decouple import config
+ from shemas import UserVkData, TokenRequest, IphoneUser
+-from app_config import auth, logger, verify_signature, verify_init_data
++from app_config import auth, logger, verify_signature, verify_init_data, get_user_id
+ 
+ 
+ 
+@@ -110,7 +110,8 @@
+ 
+ @auth_router.post("/auth")
+ def verify_user_with_vk_id(user_data: UserVkData, db: Session = Depends(get_db)):
+-    access_token, tg_id, vk_id, tg_name, init_data = user_data.access_token, user_data.tg_id, user_data.vk_id, user_data.tg_name, user_data.init_data
++    access_token, vk_id, tg_name, init_data = user_data.access_token, user_data.vk_id, user_data.tg_name, user_data.init_data
++    tg_id = get_user_id(init_data)
+ 
+     if not verify_init_data(init_data):
+         return JSONResponse(content={"error": "no verified user"}, status_code=401)
+@@ -121,7 +122,6 @@
+         return JSONResponse({"message": "user already exists"}, status_code=201)
+ 
+     try:
+-        # пробуем авторизоваться через access token
+         vk_session = vk_api.VkApi(token=access_token)
+         vk = vk_session.get_api()
+         user = vk.users.get(fields='first_name, last_name, sex', lang="ru")[0]
+@@ -129,7 +129,6 @@
+ 
+     except Exception as e:
+         print(e)
+-        # в случае исключения через vk_id
+         try:
+             vk_session = vk_api.VkApi(token=config("VK_TOKEN"))
+             vk = vk_session.get_api()
+@@ -156,25 +155,22 @@
+ 
+     return JSONResponse({"message": "ok"}, status_code=200)
+ 
+-# эндпоинт для получения access токена. Telegram bot автоматически посылает запрос на этот эндпоинт по истечению
+-# времени access токена. В качестве конфиденциальных данных в обмен на токен бот отправляет подпись, созданную с помощью
+-# общего секретного ключа. Бэкенд проверяет подпись и возвращает access токен в случае успешной проверки
+ 
+ @auth_router.post("/sign_in")
+-def get_access__token(request: Request, data: TokenRequest, db: Session = Depends(get_db)):
++def get_access_token(request: Request, data: TokenRequest, db: Session = Depends(get_db)):
+     user_id = data.user_id
+-    signature = request.headers.get("x-signature") # подпись telegram бота
++    signature = request.headers.get("x-signature")
+ 
+-    if not verify_signature(str(user_id), signature): # проверка подписи
++    if not verify_signature(str(user_id), signature):
+         return JSONResponse(content={"error": "no matches in signature comparison"}, status_code=400)
+ 
+-    has_profile = db.query(UsersGeneral).filter_by(tg_id=user_id).first()
++    profile = db.query(UsersGeneral).filter_by(tg_id=user_id).first()
+ 
+-    if not has_profile:
++    if not profile:
+         return JSONResponse(content={"error": "has no profile"}, status_code=404)
+ 
+-    access_token = auth.create_access_token(uid=str(user_id))
++    is_admin = bool(profile.is_admin)
++    access_token = auth.create_access_token(uid=str(user_id), data={"adm": is_admin})
+ 
+-    return JSONResponse(content={"access_token": access_token})
+-
++    return JSONResponse(content={"access_token": access_token, "is_admin": is_admin})
+ 
+Index: posts_feed.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Depends, BackgroundTasks\r\nfrom fastapi.responses import JSONResponse\r\nfrom sqlalchemy.orm import Session\r\nfrom sqlalchemy import desc, update, delete, func, and_\r\nfrom database import *\r\nfrom app_config import auth, logger\r\nfrom shemas import Post, PostCreate, PostStat, Likers\r\nfrom datetime import datetime, timedelta\r\nfrom authx import TokenPayload\r\nimport requests\r\n\r\nfeed_router = APIRouter()\r\n\r\nML_URL = config(\"ML_URL\")\r\nML_API_TOKEN = config(\"ML_API_TOKEN\")\r\nadmin_id = config(\"ADMIN_ID\")\r\nadmin_ids = config(\"ADMIN_IDS\")\r\n\r\ndef check_and_insert_toxicity(post_id: int, post_text: str):\r\n    headers = {\"Authorization\": f\"Bearer {ML_API_TOKEN}\"}\r\n    data = {\"inputs\": post_text}\r\n\r\n    response = requests.post(ML_URL, headers=headers, json=data)\r\n\r\n    if response.status_code == 200:\r\n        toxicity_data = response.json()\r\n\r\n        toxicity_label = toxicity_data[0][0][\"label\"] # метка токсичности\r\n\r\n        db: Session = next(get_db()) # объект бд сессии\r\n\r\n        stmt = update(Posts).filter_by(post_id=post_id).values(toxicity=toxicity_label)\r\n\r\n        db.execute(stmt)\r\n        db.commit()\r\n\r\n\r\n\r\n@feed_router.post(\"/create_post\")\r\nasync def create_post(data: PostCreate,\r\n                      background_tasks: BackgroundTasks,\r\n                      payload: TokenPayload = Depends(auth.access_token_required),\r\n                      db: Session = Depends(get_db)):\r\n\r\n    tg_id = int(payload.sub)\r\n    time_create = datetime.now()\r\n\r\n    post = Posts(time_create=time_create, text=data.text, content=data.content, creator_id=tg_id,\r\n                 describe=data.describe, type=data.type)\r\n\r\n    db.add(post)\r\n    db.commit()\r\n\r\n    # задача в отдельном потоке по проверке токсичности текста\r\n    if post.text:\r\n        background_tasks.add_task(\r\n            check_and_insert_toxicity,\r\n            post.post_id,\r\n            post.text\r\n        )\r\n\r\n    return JSONResponse(content={\"status\": \"ok\"})\r\n\r\n\r\n@feed_router.get(\"/post/feed\")\r\ndef get_post_feed(only_negative: int = 0, db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = int(payload.sub)\r\n\r\n    LIMIT = 10\r\n\r\n    stmt = delete(Posts).filter(Posts.time_create < datetime.now() - timedelta(days=1)) # удаляем старые посты\r\n    db.execute(stmt)\r\n    db.commit()\r\n\r\n    if only_negative: # только негативные посты\r\n        negative_labels = [\"insult\", \"dangerous\", \"obscenity\", \"threat\"]\r\n        posts = db.query(Posts).filter(and_(Posts.toxicity.in_(negative_labels), Posts.creator_id != user_id)).order_by(func.random()).limit(LIMIT).all()\r\n\r\n    else:\r\n        posts = db.query(Posts).order_by(func.random()).limit(LIMIT).all() # скачиваем из бд LIMIT кол во постов\r\n\r\n    if not posts:\r\n        return JSONResponse(content={\"message\": \"no posts\"}, status_code=404)\r\n\r\n    posts_json = []\r\n\r\n    for post in posts:\r\n        post_data = dict(Post.model_validate(post, from_attributes=True))\r\n        posts_json.append(post_data)\r\n\r\n    return JSONResponse(content=posts_json)\r\n\r\n\r\n@feed_router.get(\"/post/stat\")\r\ndef get_my_active_posts(db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = int(payload.sub)\r\n\r\n    posts = db.query(Posts).filter_by(creator_id=user_id).all()\r\n\r\n    if not posts:\r\n        return JSONResponse(content={\"count\": 0, \"posts\": []})\r\n\r\n    answer = []\r\n    count = 0\r\n\r\n    for post in posts:\r\n        post_data = dict(PostStat.model_validate(post, from_attributes=True))\r\n        answer.append(post_data)\r\n        count += 1\r\n\r\n    return JSONResponse(content={\"count\": count, \"posts\": answer})\r\n\r\n\r\n@feed_router.post(\"/post/{action}/{post_id}\", dependencies=[Depends(auth.access_token_required)])\r\ndef like_post(action: str, post_id: str, db: Session = Depends(get_db)):\r\n    if action == \"like\":\r\n        stmt = update(Posts).filter_by(post_id=post_id).values(likes=Posts.likes + 1)\r\n\r\n    else:\r\n        stmt = update(Posts).filter_by(post_id=post_id).values(dislikes=Posts.dislikes + 1)\r\n\r\n    db.execute(stmt)\r\n    db.commit()\r\n\r\n    return JSONResponse(content={\"status\": \"ok\"})\r\n\r\n\r\n@feed_router.post(\"/post/pay\")\r\ndef pay_for_post(db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = int(payload.sub)\r\n    post_cost = int(config(\"POST_COST_CREATE\"))\r\n\r\n    user_wallet = db.query(Wallet).filter_by(wallet_id=user_id).first()\r\n\r\n    if user_wallet.balance < post_cost:\r\n        return JSONResponse({\"error\": \"insufficient funds\", \"amount\": post_cost-user_wallet.balance}, status_code=400)\r\n\r\n    user_wallet.balance -= post_cost\r\n    db.commit()\r\n\r\n    print(f\"Пользователь заплатил {post_cost}\")\r\n    return JSONResponse(content={\"paid\": post_cost})\r\n\r\n\r\n@feed_router.get(\"/post/winners\")\r\ndef get_most_popular_posts(payload: TokenPayload = Depends(auth.access_token_required), db: Session = Depends(get_db)):\r\n    if int(payload.sub) != admin_id:\r\n        return JSONResponse(content={\"error\": \"forbidden action\"}, status_code=400)\r\n\r\n    top_posts = db.query(Posts).filter(Posts.likes != 0).order_by(desc(Posts.likes), desc(Posts.post_id)).limit(5).all()\r\n\r\n    if not top_posts:\r\n        return JSONResponse(content={\"error\": \"posts not found\"}, status_code=404)\r\n\r\n    amounts = [1000, 800, 700, 600, 500]\r\n    users_fractions = {}\r\n\r\n    for i in range(len(top_posts)):\r\n        post = top_posts[i]\r\n        prize = amounts[i]\r\n        creator_wallet = post.user_general.personal_info.wallet_info\r\n\r\n\r\n        if users_fractions.get(creator_wallet.wallet_id):\r\n            user_id = creator_wallet.wallet_id\r\n            users_fractions[user_id][\"prize\"] += prize\r\n            users_fractions[user_id][\"places\"][i+1] = {\"describe\": post.describe, \"likes\": post.likes}\r\n\r\n        else:\r\n            users_fractions[creator_wallet.wallet_id] = {\r\n                \"prize\": prize, \"places\":\r\n                    {\r\n                        i+1:\r\n                            {\r\n                                \"describe\": post.describe,\r\n                                \"likes\": post.likes\r\n                            }\r\n                    }\r\n            }\r\n\r\n    amount_sent = int(config(\"WIN_PAY\"))\r\n\r\n    return JSONResponse(content={\"status\": \"ok\", \"amount_sent\": amount_sent, \"users_fractions\": users_fractions})\r\n\r\n\r\n@feed_router.post(\"/likers/data\", dependencies=[Depends(auth.access_token_required)])\r\ndef get_likers_data(data: Likers, db: Session = Depends(get_db)):\r\n    data = db.query(UsersPersonal).filter(UsersPersonal.tg_id.in_(data.likers)).all()\r\n\r\n    answer = []\r\n\r\n    for pupil in data:\r\n        pupil_data = {\r\n            \"first_name\": pupil.first_name,\r\n            \"last_name\": pupil.last_name,\r\n            \"form\": pupil.general_info.form\r\n        }\r\n        answer.append(pupil_data)\r\n\r\n    return JSONResponse(content={\"data\": answer})\r\n\r\n\r\n@feed_router.delete(\"/post/delete\")\r\ndef delete_post(post_id: int, db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = payload.sub\r\n    admin_ids = config(\"ADMIN_IDS\")\r\n\r\n    if user_id not in admin_ids:\r\n        return JSONResponse(content={\"error\": \"not admin\"}, status_code=400)\r\n\r\n    stmt = delete(Posts).filter_by(post_id=post_id)\r\n\r\n    result = db.execute(stmt)\r\n    db.commit()\r\n\r\n    if result.rowcount == 0:\r\n        return JSONResponse(content={\"error\": \"post not found\"}, status_code=404)\r\n\r\n    return JSONResponse(content={\"status\": \"ok\"})
+===================================================================
+diff --git a/posts_feed.py b/posts_feed.py
+--- a/posts_feed.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/posts_feed.py	(date 1748330791574)
+@@ -1,9 +1,9 @@
+ from fastapi import APIRouter, Depends, BackgroundTasks
+ from fastapi.responses import JSONResponse
+ from sqlalchemy.orm import Session
+-from sqlalchemy import desc, update, delete, func, and_
++from sqlalchemy import desc, update, delete, func
+ from database import *
+-from app_config import auth, logger
++from app_config import auth
+ from shemas import Post, PostCreate, PostStat, Likers
+ from datetime import datetime, timedelta
+ from authx import TokenPayload
+@@ -13,8 +13,6 @@
+ 
+ ML_URL = config("ML_URL")
+ ML_API_TOKEN = config("ML_API_TOKEN")
+-admin_id = config("ADMIN_ID")
+-admin_ids = config("ADMIN_IDS")
+ 
+ def check_and_insert_toxicity(post_id: int, post_text: str):
+     headers = {"Authorization": f"Bearer {ML_API_TOKEN}"}
+@@ -36,7 +34,7 @@
+ 
+ 
+ 
+-@feed_router.post("/create_post")
++@feed_router.post("/post/create")
+ async def create_post(data: PostCreate,
+                       background_tasks: BackgroundTasks,
+                       payload: TokenPayload = Depends(auth.access_token_required),
+@@ -62,19 +60,17 @@
+     return JSONResponse(content={"status": "ok"})
+ 
+ 
+-@feed_router.get("/post/feed")
+-def get_post_feed(only_negative: int = 0, db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):
+-    user_id = int(payload.sub)
+-
++@feed_router.get("/post/feed", dependencies=[Depends(auth.access_token_required)])
++def get_post_feed(only_negative: int = 0, db: Session = Depends(get_db)):
+     LIMIT = 10
+ 
+     stmt = delete(Posts).filter(Posts.time_create < datetime.now() - timedelta(days=1)) # удаляем старые посты
+     db.execute(stmt)
+     db.commit()
+ 
+-    if only_negative: # только негативные посты
++    if only_negative:
+         negative_labels = ["insult", "dangerous", "obscenity", "threat"]
+-        posts = db.query(Posts).filter(and_(Posts.toxicity.in_(negative_labels), Posts.creator_id != user_id)).order_by(func.random()).limit(LIMIT).all()
++        posts = db.query(Posts).filter(Posts.toxicity.in_(negative_labels)).order_by(func.random()).limit(LIMIT).all()
+ 
+     else:
+         posts = db.query(Posts).order_by(func.random()).limit(LIMIT).all() # скачиваем из бд LIMIT кол во постов
+@@ -110,9 +106,14 @@
+ 
+     return JSONResponse(content={"count": count, "posts": answer})
+ 
+-
++# лайк или дизлайк посту
+ @feed_router.post("/post/{action}/{post_id}", dependencies=[Depends(auth.access_token_required)])
+-def like_post(action: str, post_id: str, db: Session = Depends(get_db)):
++def like_post(action: str, post_id: int, db: Session = Depends(get_db)):
++    row_exist = db.query(Posts).filter_by(post_id=post_id).first()
++
++    if not row_exist:
++        return JSONResponse(content={"error": "post does not exist"}, status_code=404)
++
+     if action == "like":
+         stmt = update(Posts).filter_by(post_id=post_id).values(likes=Posts.likes + 1)
+ 
+@@ -142,9 +143,12 @@
+     return JSONResponse(content={"paid": post_cost})
+ 
+ 
++# выплаты самым популярным постам
+ @feed_router.get("/post/winners")
+ def get_most_popular_posts(payload: TokenPayload = Depends(auth.access_token_required), db: Session = Depends(get_db)):
+-    if int(payload.sub) != admin_id:
++    is_admin = getattr(payload, "adm") # проверка на админа
++
++    if not is_admin:
+         return JSONResponse(content={"error": "forbidden action"}, status_code=400)
+ 
+     top_posts = db.query(Posts).filter(Posts.likes != 0).order_by(desc(Posts.likes), desc(Posts.post_id)).limit(5).all()
+@@ -158,7 +162,7 @@
+     for i in range(len(top_posts)):
+         post = top_posts[i]
+         prize = amounts[i]
+-        creator_wallet = post.user_general.personal_info.wallet_info
++        creator_wallet = post.user_general.wallet_info
+ 
+ 
+         if users_fractions.get(creator_wallet.wallet_id):
+@@ -182,8 +186,8 @@
+ 
+     return JSONResponse(content={"status": "ok", "amount_sent": amount_sent, "users_fractions": users_fractions})
+ 
+-
+-@feed_router.post("/likers/data", dependencies=[Depends(auth.access_token_required)])
++# получение данных тех, кто лайкнул пост
++@feed_router.post("/post/likers/data", dependencies=[Depends(auth.access_token_required)])
+ def get_likers_data(data: Likers, db: Session = Depends(get_db)):
+     data = db.query(UsersPersonal).filter(UsersPersonal.tg_id.in_(data.likers)).all()
+ 
+@@ -202,13 +206,13 @@
+ 
+ @feed_router.delete("/post/delete")
+ def delete_post(post_id: int, db: Session = Depends(get_db), payload: TokenPayload = Depends(auth.access_token_required)):
+-    user_id = payload.sub
+-    admin_ids = config("ADMIN_IDS")
++    is_admin = getattr(payload, "adm")
++    user_id = int(payload.sub)
+ 
+-    if user_id not in admin_ids:
+-        return JSONResponse(content={"error": "not admin"}, status_code=400)
+-
+-    stmt = delete(Posts).filter_by(post_id=post_id)
++    if not is_admin:
++        stmt = delete(Posts).filter_by(post_id=post_id, creator_id=user_id) # важно, чтоб пост, который собирается удалить пользователь принадлежал именно ему
++    else:
++        stmt = delete(Posts).filter_by(post_id=post_id) # если пользователь админ, о необязательно, чтоб пост принадлежал именно ему
+ 
+     result = db.execute(stmt)
+     db.commit()
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"44cf317d-2848-4057-b1d2-1d0a0d58cb51\" name=\"Changes\" comment=\"\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/auth.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/auth.py\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/user_profile.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/user_profile.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\"><![CDATA[{\r\n  \"lastFilter\": {\r\n    \"state\": \"OPEN\",\r\n    \"assignee\": \"ITemaPotema\"\r\n  }\r\n}]]></component>\r\n  <component name=\"GithubPullRequestsUISettings\"><![CDATA[{\r\n  \"selectedUrlAndAccountId\": {\r\n    \"url\": \"https://github.com/ITemaPotema/gymnasium.git\",\r\n    \"accountId\": \"7376c414-8da3-4cb5-82b0-5f4049088efc\"\r\n  }\r\n}]]></component>\r\n  <component name=\"ProjectColorInfo\"><![CDATA[{\r\n  \"associatedIndex\": 3\r\n}]]></component>\r\n  <component name=\"ProjectId\" id=\"2x5rrcMgLxiP3BE2pjCjzIVKXdP\" />\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\"><![CDATA[{\r\n  \"keyToString\": {\r\n    \"RunOnceActivity.ShowReadmeOnStart\": \"true\",\r\n    \"RunOnceActivity.git.unshallow\": \"true\",\r\n    \"git-widget-placeholder\": \"backend\",\r\n    \"ignore.virus.scanning.warn.message\": \"true\"\r\n  }\r\n}]]></component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\gymnasium\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-495700d161d3-aa17d162503b-com.jetbrains.pycharm.community.sharedIndexes.bundled-PC-243.22562.220\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"SpellCheckerSettings\" RuntimeDictionaries=\"0\" Folders=\"0\" CustomDictionaries=\"0\" DefaultDictionary=\"application-level\" UseSingleDictionary=\"true\" transferred=\"true\" />\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"44cf317d-2848-4057-b1d2-1d0a0d58cb51\" name=\"Changes\" comment=\"\" />\r\n      <created>1747238975352</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1747238975352</updated>\r\n    </task>\r\n    <servers />\r\n  </component>\r\n  <component name=\"XDebuggerManager\">\r\n    <breakpoint-manager>\r\n      <breakpoints>\r\n        <line-breakpoint enabled=\"true\" suspend=\"THREAD\" type=\"python-line\">\r\n          <url>file://$PROJECT_DIR$/posts_feed.py</url>\r\n          <option name=\"timeStamp\" value=\"1\" />\r\n        </line-breakpoint>\r\n      </breakpoints>\r\n    </breakpoint-manager>\r\n  </component>\r\n</project>
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/.idea/workspace.xml	(date 1748333693393)
+@@ -4,50 +4,53 @@
+     <option name="autoReloadType" value="SELECTIVE" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="44cf317d-2848-4057-b1d2-1d0a0d58cb51" name="Changes" comment="">
+-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/auth.py" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/user_profile.py" beforeDir="false" afterPath="$PROJECT_DIR$/user_profile.py" afterDir="false" />
++    <list default="true" id="acf81a47-0018-4a16-84c9-f9a425d9314a" name="Changes" comment="">
++      <change beforePath="$PROJECT_DIR$/app.py" beforeDir="false" afterPath="$PROJECT_DIR$/app.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/database.py" beforeDir="false" afterPath="$PROJECT_DIR$/database.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/posts_feed.py" beforeDir="false" afterPath="$PROJECT_DIR$/posts_feed.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/school_database.db" beforeDir="false" />
++      <change beforePath="$PROJECT_DIR$/user_search.py" beforeDir="false" afterPath="$PROJECT_DIR$/user_search.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+     <option name="LAST_RESOLUTION" value="IGNORE" />
++  </component>
++  <component name="FileTemplateManagerImpl">
++    <option name="RECENT_TEMPLATES">
++      <list>
++        <option value="Python Script" />
++      </list>
++    </option>
+   </component>
+   <component name="Git.Settings">
+     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+   </component>
+-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+-  "lastFilter": {
+-    "state": "OPEN",
+-    "assignee": "ITemaPotema"
+-  }
+-}]]></component>
+-  <component name="GithubPullRequestsUISettings"><![CDATA[{
+-  "selectedUrlAndAccountId": {
+-    "url": "https://github.com/ITemaPotema/gymnasium.git",
+-    "accountId": "7376c414-8da3-4cb5-82b0-5f4049088efc"
+-  }
+-}]]></component>
+-  <component name="ProjectColorInfo"><![CDATA[{
+-  "associatedIndex": 3
+-}]]></component>
+-  <component name="ProjectId" id="2x5rrcMgLxiP3BE2pjCjzIVKXdP" />
++  <component name="ProjectColorInfo">{
++  &quot;associatedIndex&quot;: 0
++}</component>
++  <component name="ProjectId" id="2vcONuZqKEmkJhRJfkYkU7MohJF" />
+   <component name="ProjectViewState">
+     <option name="hideEmptyMiddlePackages" value="true" />
+     <option name="showLibraryContents" value="true" />
+   </component>
+-  <component name="PropertiesComponent"><![CDATA[{
+-  "keyToString": {
+-    "RunOnceActivity.ShowReadmeOnStart": "true",
+-    "RunOnceActivity.git.unshallow": "true",
+-    "git-widget-placeholder": "backend",
+-    "ignore.virus.scanning.warn.message": "true"
++  <component name="PropertiesComponent">{
++  &quot;keyToString&quot;: {
++    &quot;Python.app.executor&quot;: &quot;Run&quot;,
++    &quot;Python.app_config.executor&quot;: &quot;Run&quot;,
++    &quot;Python.keys.executor&quot;: &quot;Run&quot;,
++    &quot;Python.shemas.executor&quot;: &quot;Run&quot;,
++    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
++    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
++    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
++    &quot;last_opened_file_path&quot;: &quot;C:/gymnazium587&quot;,
++    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.general&quot;
+   }
+-}]]></component>
++}</component>
+   <component name="RecentsManager">
+     <key name="MoveFile.RECENT_KEYS">
+-      <recent name="C:\gymnasium" />
++      <recent name="C:\gymnazium587\data" />
+     </key>
+   </component>
+   <component name="SharedIndexes">
+@@ -60,20 +63,45 @@
+   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+   <component name="TaskManager">
+     <task active="true" id="Default" summary="Default task">
+-      <changelist id="44cf317d-2848-4057-b1d2-1d0a0d58cb51" name="Changes" comment="" />
+-      <created>1747238975352</created>
++      <changelist id="acf81a47-0018-4a16-84c9-f9a425d9314a" name="Changes" comment="" />
++      <created>1744440858689</created>
+       <option name="number" value="Default" />
+       <option name="presentableId" value="Default" />
+-      <updated>1747238975352</updated>
++      <updated>1744440858689</updated>
+     </task>
+     <servers />
++  </component>
++  <component name="Vcs.Log.Tabs.Properties">
++    <option name="OPEN_GENERIC_TABS">
++      <map>
++        <entry key="0652d1ac-1cc9-4e28-af5b-81849d8f78ce" value="TOOL_WINDOW" />
++      </map>
++    </option>
++    <option name="TAB_STATES">
++      <map>
++        <entry key="0652d1ac-1cc9-4e28-af5b-81849d8f78ce">
++          <value>
++            <State />
++          </value>
++        </entry>
++        <entry key="MAIN">
++          <value>
++            <State />
++          </value>
++        </entry>
++      </map>
++    </option>
+   </component>
+   <component name="XDebuggerManager">
+     <breakpoint-manager>
+       <breakpoints>
+         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
++          <url>file://$PROJECT_DIR$/../gymnasium/user_search.py</url>
++          <option name="timeStamp" value="2" />
++        </line-breakpoint>
++        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
+           <url>file://$PROJECT_DIR$/posts_feed.py</url>
+-          <option name="timeStamp" value="1" />
++          <option name="timeStamp" value="3" />
+         </line-breakpoint>
+       </breakpoints>
+     </breakpoint-manager>
+Index: user_search.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from fastapi import APIRouter, Depends, Query\r\nfrom fastapi.responses import JSONResponse\r\nfrom sqlalchemy.orm import Session\r\nfrom sqlalchemy import and_, update, func\r\nfrom database import *\r\nfrom app_config import auth, all_forms\r\nfrom authx import TokenPayload\r\n\r\n\r\nsearch_router = APIRouter()\r\n\r\n\r\n@search_router.get(\"/users/{form}\", dependencies=[Depends(auth.access_token_required)])\r\ndef get_pupils_from_db(form: str, db: Session = Depends(get_db)):\r\n    data_all = db.query(UsersGeneral).filter_by(form=form).all()\r\n\r\n    data = dict()\r\n\r\n    for pupil in data_all:\r\n\r\n        pupil_data = dict()\r\n\r\n        pupil_data[\"tg_id\"] = pupil.tg_id\r\n        pupil_data[\"first_name\"] = pupil.personal_info.first_name\r\n        pupil_data[\"last_name\"] = pupil.personal_info.last_name\r\n        pupil_data[\"tg_name\"] = pupil.personal_info.tg_name\r\n        pupil_data[\"photo\"] = pupil.photo\r\n        pupil_data[\"info\"] = pupil.info\r\n        pupil_data[\"karma\"] = pupil.karma\r\n\r\n        data[pupil.tg_id] = pupil_data\r\n\r\n    return JSONResponse(content=data)\r\n\r\n\r\n\r\n@search_router.get(\"/users_feed\")\r\ndef get_user_feed(form_min: int, sex: list[int] = Query(), db: Session = Depends(get_db),\r\n                  payload: TokenPayload = Depends(auth.access_token_required)):\r\n    user_id = int(payload.sub)\r\n\r\n    need_forms = [form for form in all_forms if int(form[:len(form)-1]) >= form_min]\r\n    stmt = and_(\r\n                    UsersPersonal.tg_id != user_id,\r\n                    UsersPersonal.general_info.has(UsersGeneral.form.in_(need_forms)),\r\n                    UsersPersonal.sex.in_(sex),\r\n                )\r\n\r\n\r\n    LIMIT = 10\r\n\r\n    result = db.query(UsersPersonal).filter(stmt).order_by(func.random()).limit(LIMIT).all()\r\n\r\n    data_response = []\r\n\r\n    for personal in result:\r\n        pupil_data = {}\r\n        general_data = personal.general_info\r\n\r\n        pupil_data[\"tg_id\"] = personal.tg_id\r\n        pupil_data[\"first_name\"] = personal.first_name\r\n        pupil_data[\"last_name\"] = personal.last_name\r\n        pupil_data[\"form\"] = general_data.form\r\n        pupil_data[\"tg_name\"] = personal.tg_name\r\n        pupil_data[\"photo\"] = general_data.photo\r\n        pupil_data[\"info\"] = general_data.info\r\n        pupil_data[\"karma\"] = general_data.karma\r\n\r\n        data_response.append(pupil_data)\r\n\r\n    return JSONResponse(content=data_response)\r\n\r\n\r\n@search_router.post(\"/like\", dependencies=[Depends(auth.access_token_required)])\r\ndef like_user(tg_id: int, db: Session = Depends(get_db)):\r\n    stmt = (\r\n        update(UsersGeneral)\r\n        .filter_by(tg_id=tg_id)\r\n        .values(karma=UsersGeneral.karma + 1)\r\n    )\r\n\r\n    db.execute(stmt)\r\n    db.commit()\r\n\r\n    return JSONResponse(content={\"status\": \"ok\"})\r\n\r\n\r\n\r\n\r\n\r\n
+===================================================================
+diff --git a/user_search.py b/user_search.py
+--- a/user_search.py	(revision 3bfc2b3c55289c4bba5ca090ed954cfce162ea86)
++++ b/user_search.py	(date 1748329266248)
+@@ -10,10 +10,9 @@
+ search_router = APIRouter()
+ 
+ 
+-@search_router.get("/users/{form}", dependencies=[Depends(auth.access_token_required)])
++@search_router.get("/users/form/{form}", dependencies=[Depends(auth.access_token_required)])
+ def get_pupils_from_db(form: str, db: Session = Depends(get_db)):
+     data_all = db.query(UsersGeneral).filter_by(form=form).all()
+-
+     data = dict()
+ 
+     for pupil in data_all:
+@@ -27,6 +26,7 @@
+         pupil_data["photo"] = pupil.photo
+         pupil_data["info"] = pupil.info
+         pupil_data["karma"] = pupil.karma
++        pupil_data["is_admin"] = pupil.is_admin
+ 
+         data[pupil.tg_id] = pupil_data
+ 
+@@ -34,22 +34,28 @@
+ 
+ 
+ 
+-@search_router.get("/users_feed")
++@search_router.get("/users/feed")
+ def get_user_feed(form_min: int, sex: list[int] = Query(), db: Session = Depends(get_db),
+                   payload: TokenPayload = Depends(auth.access_token_required)):
+     user_id = int(payload.sub)
+ 
+     need_forms = [form for form in all_forms if int(form[:len(form)-1]) >= form_min]
+     stmt = and_(
+-                    UsersPersonal.tg_id != user_id,
+-                    UsersPersonal.general_info.has(UsersGeneral.form.in_(need_forms)),
++
++                    UsersGeneral.form.in_(need_forms),
+                     UsersPersonal.sex.in_(sex),
+                 )
+ 
+ 
+     LIMIT = 10
+ 
+-    result = db.query(UsersPersonal).filter(stmt).order_by(func.random()).limit(LIMIT).all()
++    result = (
++        db.query(UsersPersonal)
++        .join(UsersGeneral)
++        .filter(stmt)
++        .order_by(func.random())
++        .limit(LIMIT)
++        .all())
+ 
+     data_response = []
+ 

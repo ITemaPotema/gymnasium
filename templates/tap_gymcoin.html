@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GymCoin</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            background: #121212;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            color: white;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+            position: relative;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        #counter {
+            font-size: 48px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            user-select: none;
+            position: absolute;
+            top: 10%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: linear-gradient(45deg, #00BFFF, #0077B6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-family: 'Arial', sans-serif;
+            letter-spacing: 2px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        #counter img {
+            width: 40px;
+            height: 40px;
+        }
+
+        #icon {
+            width: 33vh;
+            height: 33vh;
+            cursor: pointer;
+            background-color: transparent;
+            border-radius: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            outline: none;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
+
+        #icon img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            transition: transform 0.1s cubic-bezier(0.4, 0, 0.2, 1);
+            user-select: none;
+            transform: scale(1);
+        }
+
+        #icon.active img,
+        #icon:active img {
+            transform: scale(0.93);
+        }
+
+        #saveText {
+            position: absolute;
+            bottom: 20%;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 36px;
+            font-weight: 800;
+            color: transparent;
+            background: linear-gradient(45deg, #2EA6FF, #1E8FD6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            outline: none;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+            transition: transform 0.1s;
+        }
+
+        #saveText.inactive {
+            color: #666;
+            background: none;
+            -webkit-background-clip: unset;
+            -webkit-text-fill-color: #666;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        #saveText:active:not(.inactive) {
+            transform: translateX(-50%) scale(0.95);
+        }
+    </style>
+</head>
+<body>
+    <div id="counter">
+        <img src="https://gymnazium587-itemapotema.amvera.io/static/images/gymcoin.png?v=1" alt="GymCoin Icon">
+        <span id="balanceValue">Загрузка баланса...</span>
+    </div>
+    <div id="icon">
+        <img src="https://gymnazium587-itemapotema.amvera.io/static/images/gymcoin.png?v=1" alt="GymCoin Icon">
+    </div>
+    <div id="saveText" onclick="resetCounter()">SAVE</div>
+
+    <script>
+        let count = 0;
+        document.getElementById('balanceValue').innerText = count;
+        updateSaveTextState();
+
+        // Обработчики для иконки
+        const icon = document.getElementById('icon');
+        icon.addEventListener('click', incrementCounter);
+        icon.addEventListener('touchstart', function() {
+            this.classList.add('active');
+        });
+        icon.addEventListener('touchend', function() {
+            this.classList.remove('active');
+        });
+
+        function updateSaveTextState() {
+            const saveText = document.getElementById('saveText');
+            saveText.classList.toggle('inactive', count < 100);
+        }
+
+        function incrementCounter() {
+            if (navigator.vibrate) navigator.vibrate(10);
+            count++;
+            document.getElementById('balanceValue').innerText = count;
+            updateSaveTextState();
+        }
+
+        async function resetCounter() {
+            if (count < 100) return;
+            await saveBalance();
+            count = 0;
+            document.getElementById('balanceValue').innerText = count;
+            updateSaveTextState();
+        }
+
+        const initData = window.Telegram.WebApp.initData;
+
+        async function saveBalance() {
+            const userId = Telegram.WebApp.initDataUnsafe.user?.id;
+            if (!userId) {
+                console.error('User ID not available');
+                return;
+            }
+
+            try {
+                const saveResponse = await fetch('/gymcoins/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        init_data: initData,
+                        balance: count,
+                    })
+                });
+
+                if (!saveResponse.ok) {
+                    throw new Error('Ошибка! Попробуйте перезапустить приложение.');
+                }
+
+                const result = await saveResponse.json();
+                console.log('Balance saved:', result);
+                Telegram.WebApp.close();
+
+            } catch (error) {
+                console.error('Error:', error);
+                Telegram.WebApp.showAlert(`Ошибка: ${error.message}`);
+            }
+        }
+    </script>
+</body>
+</html>
