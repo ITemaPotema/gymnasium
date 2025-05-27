@@ -172,7 +172,7 @@ class PostsApi(BaseApi):
         async with aiohttp.ClientSession(json_serialize=ujson.dumps) as session:
             headers = {"Authorization": f"Bearer {self.token}"}
 
-            async with session.post(f"{self.app_url}/post/{action}/{post_id}", headers=headers) as resp:
+            async with session.post(f"{self.app_url}/post/reaction/{action}/{post_id}", headers=headers) as resp:
                 if resp.status == 200:
                     exist = await redis.exists(f"{post_id}:post:actions")
                     await redis.rpush(f"{post_id}:post:actions", f"{str(self.tg_id)}:{action}") # добавляем юзера в список просмотревших данный пост
