@@ -40,7 +40,7 @@ async def main():
         pipe.set("chat_online", "0")
         await pipe.execute()
 
-    @crontab("20 16 * * *", start=True)
+    @crontab("0 0 * * *", start=True) # каждый день в полночь
     async def daily_post_payments():
         admin_id = int(config("ADMIN_ID"))
         auth_api = AuthApi(admin_id)

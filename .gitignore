@@ -1,5 +1,5 @@
-.env
-app.log
+# created by virtualenv automatically
 requirements.txt
-school_database.db
+__init__.py
+.env
 /venv/
