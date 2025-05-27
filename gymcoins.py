@@ -62,14 +62,14 @@ def save_gymcoins(data: Balance,  db: Session = Depends(get_db)):
 def withdraw_funds(query: str, funds_amount: int, db: Session = Depends(get_db),
                    payload: TokenPayload = Depends(auth.access_token_required),
                    ):
-
-    query_id, time_stamp = query.split(":")
     user_id = int(payload.sub)
+    tag, query_id, time_stamp = query.split(":")
 
-    if not verify_signature(str(user_id), query_id): # проверка query_id на подлинность
-        return JSONResponse(content={"error": "no matches in signature comparison"}, status_code=400)
+    if not verify_signature(time_stamp + str(user_id), query_id):  # проверка query_id на подлинность
+        if tag != "withdraw":
+            return JSONResponse(content={"error": "no matches in signature comparison"}, status_code=400)
 
-    if not check_query_id_unique(query_id, int(time_stamp)): # проверка query_id на одноразовость
+    if not check_query_id_unique(query_id, int(time_stamp)):  # проверка query_id на одноразовость
         return JSONResponse(content={"error": "query is not valid"}, status_code=400)
 
     user_id = int(payload.sub)

@@ -49,8 +49,8 @@ def verify_signature(data: str, signature: str) -> bool:
 
 
 BOT_TOKEN = config("BOT_TOKEN")
-REDIS_DOMAIN = "localhost" # config("REDIS_DOMAIN")
-REDIS_PASSWORD = None # config("REDIS_PASSWORD")
+REDIS_DOMAIN = config("REDIS_DOMAIN")
+REDIS_PASSWORD = config("REDIS_PASSWORD")
 
 def get_redis():
     return Redis(host=REDIS_DOMAIN, password=REDIS_PASSWORD, port=6379, db=1)
@@ -68,18 +68,17 @@ def get_user_id(init_data: str):
 # проверка на одноразовость query_id
 def check_query_id_unique(query_id: str, time_stamp: int):
     redis = get_redis()
-    query_id = query_id[:16] # первые 16 символов hmac сигнатуры
 
     time_delta = int(time.time()) - time_stamp
-    if time_delta > 3600 * 2: # проверка, что запрос не старый (2 часа)
+    if time_delta > 3600 * 2:  # проверка, что запрос не старый (2 часа)
         return False
 
     print(f"time_delta: {time_delta}", f"query_id={query_id}")
 
-    if redis.get(f"used_query_id:{query_id}"): # проверка того, что данный query_id не был в недавних запросах
+    if redis.get(f"used_query_id:{query_id}"):  # проверка того, что данный query_id не был в недавних запросах
         return False
 
-    redis.setex(f"used_query_id:{query_id}", 3600 * 2, query_id) # сохраняем query_id на 2 часа
+    redis.setex(f"used_query_id:{query_id}", 3600 * 2, query_id)  # сохраняем query_id на 2 часа
 
     return True
 
