@@ -1,0 +1,5 @@
+.env
+app.log
+requirements.txt
+school_database.db
+/venv/
