@@ -110,7 +110,6 @@ async def registration(callback: CallbackQuery, state: FSMContext):
 
     if saved_progress_data:
         result = await auth_api.create_profile(saved_progress_data)
-        print(result.status)
 
         if result.status == CreateStatus.SUCCESS:
             await callback.message.answer("Профиль успешно создан! Чтобы перейти в него, нажмите на кнопку 'Профиль' ещё раз.")

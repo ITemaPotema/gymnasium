@@ -36,7 +36,7 @@ class GymcoinsApi(BaseApi):
 
         time_stamp = str(int(time.time()))  # временная метка
         query_generate = time_stamp + str(self.tg_id)  # данные для подписи, обеспечивают уникальность query_id
-        query_id = BaseApi.generate_signature(query_generate, self.secret_key)[:16]  # генерируем сигнатуру используя общий секретный ключ, query_id - первые 16 символов
+        query_id = BaseApi.generate_signature(query_generate, self.secret_key)  # генерируем сигнатуру используя общий секретный ключ
 
         query = f"withdraw:{query_id}:{time_stamp}"
 

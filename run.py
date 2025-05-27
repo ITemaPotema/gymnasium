@@ -1,5 +1,4 @@
 import asyncio
-import aiocron
 from handlers.bot_config import bot, dp
 from handlers.base import base_router
 from handlers.registration import registration_router
